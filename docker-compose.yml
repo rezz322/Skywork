@@ -1,0 +1,68 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: osint_redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+
+#   db-service:
+#     build:
+#       context: ./db-service
+#     container_name: osint_db_service
+#     restart: always
+#     environment:
+#       DB_HOST: host.docker.internal
+#       DB_PORT: 5432
+#       DB_USER: postgres
+#       DB_PASSWORD: ${DB_PASSWORD:-1234567890}
+#       DB_NAME: osint
+#     extra_hosts:
+#       - "host.docker.internal:host-gateway"
+#
+  pay-service:
+    build:
+      context: ./pay-service
+    container_name: osint_pay_service
+    restart: always
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DB_URL: postgres://postgres:${DB_PASSWORD:-1234567890}@host.docker.internal:5432/osint?sslmode=disable
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
+
+  bot-service:
+    build:
+      context: ./bot
+    container_name: osint_bot_service
+    restart: always
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      REDIS_URL: redis://redis:6379/0
+      DB_SERVICE_URL: http://db-service:8000
+      DB_HOST: host.docker.internal
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-1234567890}
+      DB_NAME: osint
+      POSTGRES_DB: user_bots
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-1234567890}
+      POSTGRES_HOST: host.docker.internal
+      DOCKER_ENV: "true"
+      CH_HOST: host.docker.internal
+      CH_PORT: 8123
+      CH_USER: default
+      CH_PASSWORD: ${CH_PASSWORD:-8797}
+      CH_DATABASE: default
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
+#      - db-service
+
+volumes:
+  redis_data:
