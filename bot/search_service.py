@@ -25,11 +25,11 @@ class ClickHouseSearchService:
         
         # Настройки подключения
         self.config = {
-            'host': os.getenv("CH_HOST", "host.docker.internal"),
+            'host': os.getenv("CH_HOST"),
             'port': int(os.getenv("CH_PORT", 8123)),
-            'username': os.getenv("CH_USER", "default"),
-            'password': os.getenv("CH_PASSWORD", "8797"),
-            'database': os.getenv("CH_DATABASE", "default")
+            'username': os.getenv("CH_USER"),
+            'password': os.getenv("CH_PASSWORD"),
+            'database': os.getenv("CH_DATABASE")
         }
 
     async def get_client(self):

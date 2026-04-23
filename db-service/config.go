@@ -20,11 +20,11 @@ type DBConfig struct {
 
 func GetDBConfig() DBConfig {
     cfg := DBConfig{
-        DBName:   getEnv("DB_NAME", "osint"),
-        User:     getEnv("DB_USER", "postgres"),
-        Password: getEnv("DB_PASSWORD", "1234567890"),
-        Host:     getEnv("DB_HOST", "localhost"),
-        Port:     getEnv("DB_PORT", "5432"),
+        DBName:   getEnv("DB_NAME", ""),
+        User:     getEnv("DB_USER", ""),
+        Password: getEnv("DB_PASSWORD", ""),
+        Host:     getEnv("DB_HOST", ""),
+        Port:     getEnv("DB_PORT", ""),
     }
     return cfg
 }
