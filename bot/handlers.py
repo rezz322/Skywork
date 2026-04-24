@@ -23,38 +23,30 @@ async def cmd_start(message: types.Message):
 @router.message(Command("stats", "статс"))
 async def cmd_stats(message: types.Message):
     try:
-        # 1. Первый запрос - общее количество
+        # Запрашиваем только общее количество (это очень быстро)
         success, res_data = await search_service.execute_raw_sql("SELECT count() FROM global_search_n")
+        
         if not success or not res_data:
-            await message.answer("❌ Ошибка при получении статистики.")
+            await message.answer("❌ Не вдалося отримати статистику.")
             return
         
         total_count = res_data[0][0]
         
-        # 2. Второй запрос - топ источников
-        success, sources_data = await search_service.execute_raw_sql(
-            "SELECT source_table, count() as cnt FROM global_search_n GROUP BY source_table ORDER BY cnt DESC LIMIT 15"
+        # Форматируем число с пробелами (например, 506 123 456)
+        formatted_count = f"{total_count:,}".replace(",", " ")
+        
+        # Минималистичное сообщение без сложной разметки
+        stats_msg = (
+            f"📊 <b>Статистика бази даних</b>\n\n"
+            f"📈 <b>Всього записів:</b> <code>{formatted_count}</code>\n"
+            f"⚡️ <i>Система працює в штатному режимі</i>"
         )
         
-        # Используем HTML для надежности
-        stats_msg = f"📊 <b>Статистика бази даних</b>\n\n"
-        stats_msg += f"📈 <b>Всього записів:</b> <code>{total_count:,}</code>\n\n".replace(",", " ")
-        stats_msg += f"🗂 <b>Топ-15 джерел:</b>\n"
-        
-        if success and isinstance(sources_data, list):
-            for row in sources_data:
-                source, count = row
-                # Экранируем название источника, чтобы символы типа _ или < не ломали разметку
-                safe_source = html.escape(str(source))
-                stats_msg += f"• {safe_source}: <code>{count:,}</code>\n".replace(",", " ")
-        
-        # Меняем parse_mode на HTML
         await message.answer(stats_msg, parse_mode="HTML")
 
     except Exception as e:
         logger.error(f"Error in cmd_stats: {e}")
-        await message.answer("⚠️ Произошла внутренняя ошибка.")
-
+        await message.answer("⚠️ Помилка при виведенні статистики.")
 @router.message(F.text)
 async def handle_search(message: types.Message):
     register_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
