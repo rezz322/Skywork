@@ -23,27 +23,37 @@ async def cmd_start(message: types.Message):
 @router.message(Command("stats", "статс"))
 async def cmd_stats(message: types.Message):
     try:
+        # 1. Первый запрос - общее количество
         success, res_data = await search_service.execute_raw_sql("SELECT count() FROM global_search_n")
         if not success or not res_data:
+            await message.answer("❌ Ошибка при получении статистики.")
             return
         
         total_count = res_data[0][0]
+        
+        # 2. Второй запрос - топ источников
         success, sources_data = await search_service.execute_raw_sql(
             "SELECT source_table, count() as cnt FROM global_search_n GROUP BY source_table ORDER BY cnt DESC LIMIT 15"
         )
         
-        stats_msg = f"📊 **Статистика бази даних**\n\n"
-        stats_msg += f"📈 **Всього записів:** `{total_count:,}`\n\n".replace(",", " ")
-        stats_msg += f"🗂 **Топ-15 джерел:**\n"
+        # Используем HTML для надежности
+        stats_msg = f"📊 <b>Статистика бази даних</b>\n\n"
+        stats_msg += f"📈 <b>Всього записів:</b> <code>{total_count:,}</code>\n\n".replace(",", " ")
+        stats_msg += f"🗂 <b>Топ-15 джерел:</b>\n"
         
         if success and isinstance(sources_data, list):
             for row in sources_data:
                 source, count = row
-                stats_msg += f"• {source}: `{count:,}`\n".replace(",", " ")
+                # Экранируем название источника, чтобы символы типа _ или < не ломали разметку
+                safe_source = html.escape(str(source))
+                stats_msg += f"• {safe_source}: <code>{count:,}</code>\n".replace(",", " ")
         
-        await message.answer(stats_msg, parse_mode="Markdown")
+        # Меняем parse_mode на HTML
+        await message.answer(stats_msg, parse_mode="HTML")
+
     except Exception as e:
         logger.error(f"Error in cmd_stats: {e}")
+        await message.answer("⚠️ Произошла внутренняя ошибка.")
 
 @router.message(F.text)
 async def handle_search(message: types.Message):

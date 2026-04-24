@@ -1,4 +1,36 @@
 services:
+  # --- БАЗЫ ДАННЫХ ---
+  postgres:
+    image: postgres:15-alpine
+    container_name: osint_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - osint_net
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: osint_clickhouse
+    restart: always
+    environment:
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_PASSWORD=8797
+      - CLICKHOUSE_DB=${CH_DATABASE}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse
+    networks:
+      - osint_net
+
   redis:
     image: redis:alpine
     container_name: osint_redis
@@ -8,19 +40,21 @@ services:
     networks:
       - osint_net
 
+  # --- МИКРОСЕРВИСЫ ---
+
   db-service:
     build:
       context: ./db-service
     container_name: osint_db_service
     restart: always
     environment:
-      DB_HOST: ${DB_HOST}
-      DB_PORT: ${DB_PORT}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_NAME: ${DB_NAME}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      DB_HOST: postgres # Теперь бот видит базу по имени сервиса
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+    depends_on:
+      - postgres
     networks:
       - osint_net
 
@@ -45,22 +79,23 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       REDIS_URL: redis://redis:6379/0
       DB_SERVICE_URL: http://db-service:8000
-      POSTGRES_HOST: ${POSTGRES_HOST}
-      POSTGRES_PORT: ${POSTGRES_PORT}
+      # Важно: указываем имена контейнеров вместо IP
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-      CH_HOST: ${CH_HOST}
-      CH_PORT: ${CH_PORT}
+      CH_HOST: clickhouse
+      CH_PORT: 8123 # HTTP порт для большинства библиотек
       CH_USER: ${CH_USER}
       CH_PASSWORD: ${CH_PASSWORD}
       CH_DATABASE: ${CH_DATABASE}
       DOCKER_ENV: "true"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       - redis
       - db-service
+      - postgres
+      - clickhouse
     networks:
       - osint_net
 
@@ -70,3 +105,6 @@ networks:
 
 volumes:
   redis_data:
+  postgres_data:
+  clickhouse_data:
+  clickhouse_logs:
