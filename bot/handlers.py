@@ -20,7 +20,7 @@ logger = logging.getLogger("bot.handlers")
 def get_main_keyboard():
     builder = ReplyKeyboardBuilder()
     builder.row(types.KeyboardButton(text="🔍 Пошук"), types.KeyboardButton(text="👤 Кабінет"))
-    # builder.row(types.KeyboardButton(text="💳 Оплатити"))
+    builder.row(types.KeyboardButton(text="🌐 Режим пошуку"))
     return builder.as_markup(resize_keyboard=True)
 
 # def get_pay_keyboard():
@@ -123,6 +123,20 @@ async def cmd_stats(message: types.Message):
 #         logger.error(f"Error in cmd_pay: {e}")
 #         await message.answer(f"❌ Критична помилка: {str(e)}")
 
+@router.message(F.text == "🌐 Режим пошуку")
+async def change_mode(message: types.Message):
+    is_active, _ = check_subscription(message.from_user.id)
+    if not is_active:
+        await message.answer("⚠️ **Доступ обмежено!**\nБудь ласка, введіть пароль.", parse_mode="Markdown")
+        return
+    
+    current_mode = await r.get(f"user_mode:{message.from_user.id}") or "ua"
+    new_mode = "ru" if current_mode == "ua" else "ua"
+    await r.set(f"user_mode:{message.from_user.id}", new_mode)
+    
+    mode_name = "🌍 (RU)" if new_mode == "ru" else " (UA)"
+    await message.answer(f"✅ **Режим змінено на:** {mode_name}")
+
 @router.message(F.text == "👤 Кабінет")
 async def show_cabinet(message: types.Message):
     is_active, expiry = check_subscription(message.from_user.id)
@@ -130,6 +144,9 @@ async def show_cabinet(message: types.Message):
         await message.answer("⚠️ **Доступ обмежено!**\nБудь ласка, введіть пароль.", parse_mode="Markdown")
         return
     user_info = get_user_info(message.from_user.id)
+    
+    current_mode = await r.get(f"user_mode:{message.from_user.id}") or "ua"
+    mode_name = "🌍  (RU)" if current_mode == "ru" else " (UA)"
     
     status_text = "✅ Активна" if is_active else "❌ Неактивна"
     expiry_date = expiry.strftime("%d.%m.%Y %H:%M") if expiry else "Немає даних"
@@ -140,7 +157,8 @@ async def show_cabinet(message: types.Message):
             user_id=message.from_user.id,
             status=status_text,
             expiry=expiry_date,
-            reg_date=reg_date
+            reg_date=reg_date,
+            mode=mode_name
         ),
         parse_mode="Markdown"
     )
@@ -242,7 +260,10 @@ async def handle_search(message: types.Message):
         return
 
     raw_text = message.text.strip()
-    logger.info(f"===> Поиск от {message.from_user.id}: '{raw_text}'")
+    current_mode = await r.get(f"user_mode:{message.from_user.id}") or "ua"
+    table_name = "global_search_n" if current_mode == "ua" else "global_search_ru"
+    
+    logger.info(f"===> Поиск от {message.from_user.id} [Режим: {current_mode}]: '{raw_text}'")
     
     manual_field = None
     query_content = raw_text

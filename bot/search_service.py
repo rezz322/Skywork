@@ -130,8 +130,9 @@ class ClickHouseSearchService:
             return query.replace('-', '.')
         return query
 
-    async def search(self, raw_query: str, manual_field: str = None, pivot_level: int = 0):
+    async def search(self, raw_query: str, manual_field: str = None, pivot_level: int = 0, table: str = None):
         """Асинхронный поиск с умным определением полей, поддержкой фильтров и Pivot."""
+        target_table = table or self.table
         query = raw_query.strip()
         if not query:
             return []
@@ -195,12 +196,12 @@ class ClickHouseSearchService:
             token_conditions = [f"hasToken(fio, %(t{i})s)" for i in range(len(tokens))]
             order_by_clause = f"ORDER BY {', '.join(order_by_parts)}, fio ASC" if order_by_parts else "ORDER BY fio ASC"
             
-            sql = f"SELECT * FROM {self.table} WHERE {' AND '.join(token_conditions)} {date_filter} {order_by_clause} LIMIT 1000"
+            sql = f"SELECT * FROM {target_table} WHERE {' AND '.join(token_conditions)} {date_filter} {order_by_clause} LIMIT 1000"
             for i, token in enumerate(tokens):
                 params[f"t{i}"] = token
         
         elif field in ["address", "nickname", "transport"]:
-            sql = f"SELECT * FROM {self.table} WHERE {field} ILIKE %(q)s LIMIT 1000"
+            sql = f"SELECT * FROM {target_table} WHERE {field} ILIKE %(q)s LIMIT 1000"
             params["q"] = f"%{clean_query}%"
         elif field == "phone":
             # Используем "Умную группировку" для поиска форматированных номеров
@@ -214,7 +215,7 @@ class ClickHouseSearchService:
             
             # Сортировка: Сначала точные совпадения, потом по длине
             sql = f"""
-                SELECT * FROM {self.table} 
+                SELECT * FROM {target_table} 
                 WHERE ({field} LIKE %(q_smart)s OR {field} LIKE %(q_strict)s)
                 ORDER BY ({field} = %(exact)s OR {field} = %(exact_plus)s) DESC, length({field}) ASC 
                 LIMIT 1000
@@ -226,7 +227,7 @@ class ClickHouseSearchService:
         elif field == "defect":
             return []
         else:
-            sql = f"SELECT * FROM {self.table} WHERE {field} = %(q)s LIMIT 1000"
+            sql = f"SELECT * FROM {target_table} WHERE {field} = %(q)s LIMIT 1000"
             params["q"] = clean_query
 
         logger.info(f"Executing search [level {pivot_level}]: {field}='{clean_query}'")
@@ -274,7 +275,7 @@ class ClickHouseSearchService:
                 # Запускаем до 5 параллельных поисков
                 pivots_limit = final_pivots[:5]
                 if pivots_limit:
-                    tasks = [self.search(q, manual_field=f, pivot_level=1) for q, f in pivots_limit]
+                    tasks = [self.search(q, manual_field=f, pivot_level=1, table=target_table) for q, f in pivots_limit]
                     pivot_results_all = await asyncio.gather(*tasks)
                     
                     for pivot_results in pivot_results_all:
@@ -325,5 +326,5 @@ class ClickHouseSearchService:
 # Singleton сервис
 service = ClickHouseSearchService()
 
-async def search_across_tables(query: str, manual_field: str = None):
-    return await service.search(query, manual_field)
+async def search_across_tables(query: str, manual_field: str = None, table: str = None):
+    return await service.search(query, manual_field, table=table)

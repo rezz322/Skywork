@@ -40,6 +40,20 @@ async def listen_for_completions():
 
 async def main():
     logger.info("Starting bot...")
+    
+    # Чекаємо на Redis
+    for i in range(10):
+        try:
+            await r.ping()
+            logger.info("Successfully connected to Redis")
+            break
+        except Exception as e:
+            logger.warning(f"Waiting for Redis... (attempt {i+1}/10): {e}")
+            await asyncio.sleep(2)
+    else:
+        logger.error("Could not connect to Redis after 10 attempts. Exiting.")
+        return
+
     # Регистрация роутера с хендлерами
     dp.include_router(router)
     

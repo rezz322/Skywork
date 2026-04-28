@@ -79,5 +79,15 @@ def generate_html_report(query, results, current_time_str):
             cleaned_results.append(new_table_data)
 
     total_records = sum(len(table_data) - 1 for table_data in cleaned_results)
-    template = Template(messages.HTML_REPORT_TEMPLATE)
+    
+    import os
+    try:
+        template_path = os.path.join(os.path.dirname(__file__), 'report_template.html')
+        with open(template_path, 'r', encoding='utf-8') as f:
+            template_content = f.read()
+        template = Template(template_content)
+    except Exception:
+        # Фоллбек на старий спосіб (якщо файл не знайдено)
+        template = Template("<html><body>Error loading template</body></html>")
+        
     return template.render(query=query, results=cleaned_results, total_records=total_records, current_time=current_time_str)
