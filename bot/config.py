@@ -17,6 +17,7 @@ logger = logging.getLogger("bot")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 DB_SERVICE_URL = os.getenv("DB_SERVICE_URL")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "1234")
 
 if not TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN is not set. Exiting.")

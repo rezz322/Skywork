@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # --- БАЗЫ ДАННЫХ ---
   postgres:
@@ -17,6 +19,9 @@ services:
     image: clickhouse/clickhouse-server:latest
     container_name: osint_clickhouse
     restart: always
+    ports:
+      - "8123:8123"
+      - "9000:9000"
     environment:
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
       - CLICKHOUSE_PASSWORD=8797
@@ -32,7 +37,7 @@ services:
       - osint_net
 
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     container_name: osint_redis
     restart: always
     volumes:
@@ -41,20 +46,21 @@ services:
       - osint_net
 
   # --- МИКРОСЕРВИСЫ ---
-
   db-service:
     build:
       context: ./db-service
     container_name: osint_db_service
     restart: always
     environment:
-      DB_HOST: postgres # Теперь бот видит базу по имени сервиса
-      DB_PORT: 5432
+      DB_HOST: ${POSTGRES_HOST}
+      DB_PORT: ${POSTGRES_PORT}
+
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_NAME: ${POSTGRES_DB}
     depends_on:
       - postgres
+      - clickhouse
     networks:
       - osint_net
 
@@ -65,8 +71,19 @@ services:
     restart: always
     environment:
       PORT: 8080
+      CRYPTO_PAY_TOKEN: ${CRYPTO_PAY_TOKEN}
+      IPN_CALLBACK_URL: ${IPN_CALLBACK_URL}
+      DB_HOST: ${POSTGRES_HOST}
+      DB_PORT: ${POSTGRES_PORT}
+
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
     ports:
       - "8080:8080"
+    depends_on:
+      - postgres
     networks:
       - osint_net
 
@@ -79,17 +96,18 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       REDIS_URL: redis://redis:6379/0
       DB_SERVICE_URL: http://db-service:8000
-      # Важно: указываем имена контейнеров вместо IP
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-      CH_HOST: clickhouse
-      CH_PORT: 8123 # HTTP порт для большинства библиотек
+      CH_HOST: ${CH_HOST}
+
+      CH_PORT: ${CH_PORT}
       CH_USER: ${CH_USER}
       CH_PASSWORD: ${CH_PASSWORD}
       CH_DATABASE: ${CH_DATABASE}
+      AUTH_PASSWORD: ${AUTH_PASSWORD}
       DOCKER_ENV: "true"
     depends_on:
       - redis
@@ -99,6 +117,7 @@ services:
     networks:
       - osint_net
 
+# ВАЖНО: Эти блоки стоят без отступов от левого края!
 networks:
   osint_net:
     driver: bridge

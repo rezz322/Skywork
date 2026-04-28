@@ -43,8 +43,9 @@ async def main():
     # Регистрация роутера с хендлерами
     dp.include_router(router)
     
-    # Запуск фоновой задачи
-    asyncio.create_task(listen_for_completions())
+    # Запуск фонової задачі (відключено через помилки з'єднання з неіснуючим сервісом)
+    # asyncio.create_task(listen_for_completions())
+
     
     # Запуск поллинга
     await dp.start_polling(bot)
