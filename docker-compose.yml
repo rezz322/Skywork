@@ -24,7 +24,7 @@ services:
       - "9000:9000"
     environment:
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
-      - CLICKHOUSE_PASSWORD=8797
+      - CLICKHOUSE_PASSWORD=${CH_PASSWORD:-8797}
       - CLICKHOUSE_DB=${CH_DATABASE}
     ulimits:
       nofile:
@@ -33,6 +33,12 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse
+      - ./clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - osint_net
 
