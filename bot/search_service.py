@@ -101,11 +101,14 @@ class ClickHouseSearchService:
         if q_clean.isdigit() and length > 15:
             return "defect"
 
+        if len(query) == 17 and re.match(r'^[A-HJ-NPR-Z0-9]{17}$', query.upper()):
+            return "vin"
         if query.startswith('@'):
             return "nickname"
         if len(query.split()) >= 2:
             return "fio"
         return "fio"
+
 
     def format_query(self, query: str, field: str) -> str:
         """Форматирование запроса."""
@@ -146,8 +149,10 @@ class ClickHouseSearchService:
             'dates': re.findall(r'\b(?:\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})\b', query),
             'years': re.findall(r'\b(?:19\d{2}|20[012]\d)\b', query),
             'inns': re.findall(r'\b\d{10}\b|\b\d{12}\b', query),
-            'passports': re.findall(r'\b\d{4}\s\d{6}\b', query)
+            'passports': re.findall(r'\b\d{4}\s\d{6}\b', query),
+            'vins': re.findall(r'\b[A-HJ-NPR-Z0-9]{17}\b', query.upper())
         }
+
 
         # Очищаємо запит від знайдених ідентифікаторів, щоб залишити тільки ПІБ
         clean_fio = query
@@ -193,6 +198,12 @@ class ClickHouseSearchService:
             conditions.append(f"({' OR '.join(inn_conds)})")
             for i, inn in enumerate(criteria['inns']): params[f"inn{i}"] = inn
 
+        if criteria['vins']:
+            vin_conds = [f"(transport ILIKE %(v{i})s OR raw_data ILIKE %(v{i})s)" for i in range(len(criteria['vins']))]
+            conditions.append(f"({' OR '.join(vin_conds)})")
+            for i, v in enumerate(criteria['vins']): params[f"v{i}"] = f"%{v}%"
+
+
         if not conditions:
             tokens = [re.sub(r'[^\w]', '', t.lower()) for t in query.split() if len(re.sub(r'[^\w]', '', t)) >= 2]
             if not tokens: return []
@@ -214,7 +225,7 @@ class ClickHouseSearchService:
             # --- Оптимизированный Механизм Smart Pivot ---
             if pivot_level == 0:
                 pivots_candidate = set()
-                pivot_keys = {'phone', 'mobile', 'telephone', 'телефон', 'номер', 'email', 'inn', 'іпн', 'snils', 'снілс', 'tg_id', 'id', 'passport'}
+                pivot_keys = {'phone', 'mobile', 'telephone', 'телефон', 'номер', 'email', 'inn', 'іпн', 'snils', 'снілс', 'tg_id', 'id', 'passport', 'vin', 'transport'}
                 
                 # Сканируем только первые 200 строк для ускорения
                 for row in rows[:200]:
@@ -229,12 +240,17 @@ class ClickHouseSearchService:
                             elif 'email' in k_lower:
                                 emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', val_str)
                                 for e in emails: pivots_candidate.add((e, "email"))
+                            elif 'vin' in k_lower or 'transport' in k_lower:
+                                vins = re.findall(r'[A-HJ-NPR-Z0-9]{17}', val_str.upper())
+                                for v_val in vins: pivots_candidate.add((v_val, "vin"))
                             else:
-                                clean_id = re.sub(r'[^\d]', '', val_str) if k_lower != 'email' else val_str
+                                # Для ИНН/Паспорта/СНИЛС оставляем только цифры
+                                clean_id = re.sub(r'[^\d]', '', val_str)
                                 if clean_id:
                                     detected = self.detect_search_field(clean_id)
                                     if detected not in ["fio", "nickname", "address", "tg_id"]:
                                         pivots_candidate.add((clean_id, detected))
+
 
                 # Фильтруем текущий запрос и ограничиваем количество рекурсий
                 final_pivots = [(q, f) for q, f in pivots_candidate if q != clean_query]
