@@ -131,106 +131,77 @@ class ClickHouseSearchService:
         return query
 
     async def search(self, raw_query: str, manual_field: str = None, pivot_level: int = 0, table: str = None):
-        """Асинхронный поиск с умным определением полей, поддержкой фильтров и Pivot."""
+        """Асинхронний пошук з автоматичним розпізнаванням кількох критеріїв одночасно."""
         target_table = table or self.table
         query = raw_query.strip()
-        if not query:
-            return []
-            
-        field = manual_field or self.detect_search_field(query)
-        clean_query = self.format_query(query, field)
+        clean_query = query
+        if not query: return []
         
-        # --- Защита от "пустых" или слишком коротких поисков (предотвращаем LIKE '%') ---
-        if not clean_query:
-            logger.warning(f"Aborting search: clean_query is empty for {raw_query}")
-            return []
-            
-        # Минимальные куски для поиска (чтобы не искал по 1 цифре)
-        if field == "phone" and len(clean_query) < 7:
-            logger.warning(f"Phone query too short: {clean_query}")
-            return []
-        if field in ["inn", "snils", "passport", "tg_id", "email"] and len(clean_query) < 5:
-            logger.warning(f"ID query too short: {clean_query}")
-            return []
-        if field == "fio" and len(clean_query) < 3:
-            logger.warning(f"FIO query too short: {clean_query}")
-            return []
+        # 1. Витягуємо всі можливі ідентифікатори з запиту
+        q_clean_for_phones = re.sub(r'[\s\-\.\(\)\+]', '', query)
+        
+        criteria = {
+            'phones': re.findall(r'\b(?:\+?380|7|8|0)\d{9,11}\b', q_clean_for_phones),
+            'emails': re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', query),
+            'dates': re.findall(r'\b(?:\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})\b', query),
+            'years': re.findall(r'\b(?:19\d{2}|20[012]\d)\b', query),
+            'inns': re.findall(r'\b\d{10}\b|\b\d{12}\b', query),
+            'passports': re.findall(r'\b\d{4}\s\d{6}\b', query)
+        }
 
-        # Получаем клиент
-        client = await self.get_client()
+        # Очищаємо запит від знайдених ідентифікаторів, щоб залишити тільки ПІБ
+        clean_fio = query
+        for key in criteria:
+            for val in criteria[key]:
+                clean_fio = clean_fio.replace(val, "")
+        
+        fio_tokens = [re.sub(r'[^\w]', '', t.lower()) for t in clean_fio.split() if len(re.sub(r'[^\w]', '', t)) > 2]
 
+        # 2. Будуємо SQL умову
+        conditions = []
         params = {}
-        date_filter = ""
-        
-        # 1. Если поиск по ФИО, попробуем найти дату или год в строке
-        if field == "fio":
-            # Ищем полную дату (ДД.ММ.ГГГГ или ГГГГ-ММ-ДД)
-            date_match = re.search(r'(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})', query)
-            # Ищем год (4 цифры в диапазоне 1900-2026)
-            year_match = re.search(r'\b(19\d{2}|20[012]\d)\b', query)
-            
-            date_filter = ""
-            order_by_parts = []
-            clean_query = query
-            
-            if date_match:
-                extracted_date = date_match.group(0)
-                params["extracted_date"] = extracted_date
-                date_filter = "AND birth_date = %(extracted_date)s"
-                order_by_parts.append("(birth_date = %(extracted_date)s) DESC")
-                clean_query = clean_query.replace(extracted_date, "")
-            elif year_match:
-                extracted_year = year_match.group(0)
-                params["extracted_year"] = f"%{extracted_year}%"
-                date_filter = "AND birth_date ILIKE %(extracted_year)s"
-                order_by_parts.append("(birth_date ILIKE %(extracted_year)s) DESC")
-                clean_query = clean_query.replace(extracted_year, "")
-            
-            clean_query = clean_query.strip().lower()
-            raw_tokens = [t.strip() for t in re.split(r'[,; ]', clean_query) if t.strip()]
-            # Очистка токенов от лишних символов (например, Иванов, -> иванов)
-            tokens = [re.sub(r'[^\w]', '', t) for t in raw_tokens if re.sub(r'[^\w]', '', t)]
-            
-            if not tokens: return []
-            
-            token_conditions = [f"hasToken(fio, %(t{i})s)" for i in range(len(tokens))]
-            order_by_clause = f"ORDER BY {', '.join(order_by_parts)}, fio ASC" if order_by_parts else "ORDER BY fio ASC"
-            
-            sql = f"SELECT * FROM {target_table} WHERE {' AND '.join(token_conditions)} {date_filter} {order_by_clause} LIMIT 1000"
-            for i, token in enumerate(tokens):
-                params[f"t{i}"] = token
-        
-        elif field in ["address", "nickname", "transport"]:
-            sql = f"SELECT * FROM {target_table} WHERE {field} ILIKE %(q)s LIMIT 1000"
-            params["q"] = f"%{clean_query}%"
-        elif field == "phone":
-            # Используем "Умную группировку" для поиска форматированных номеров
-            # Например: 9031234567 -> %903%123%4567% (найдет и со скобками, и без)
-            if len(clean_query) >= 10:
-                # Берем последние 10 цифр и делим на логические блоки: [3][3][4]
-                core = clean_query[-10:]
-                smart_pattern = f"%{core[:3]}%{core[3:6]}%{core[6:]}%"
-            else:
-                smart_pattern = f"%{clean_query}%"
-            
-            # Сортировка: Сначала точные совпадения, потом по длине
-            sql = f"""
-                SELECT * FROM {target_table} 
-                WHERE ({field} LIKE %(q_smart)s OR {field} LIKE %(q_strict)s)
-                ORDER BY ({field} = %(exact)s OR {field} = %(exact_plus)s) DESC, length({field}) ASC 
-                LIMIT 1000
-            """
-            params["q_smart"] = smart_pattern
-            params["q_strict"] = f"%{clean_query}%"
-            params["exact"] = clean_query
-            params["exact_plus"] = "+" + clean_query
-        elif field == "defect":
-            return []
-        else:
-            sql = f"SELECT * FROM {target_table} WHERE {field} = %(q)s LIMIT 1000"
-            params["q"] = clean_query
 
-        logger.info(f"Executing search [level {pivot_level}]: {field}='{clean_query}'")
+        if fio_tokens:
+            for i, token in enumerate(fio_tokens):
+                conditions.append(f"hasToken(fio, %(t{i})s)")
+                params[f"t{i}"] = token
+
+        if criteria['phones']:
+            phone_conds = []
+            for i, p in enumerate(criteria['phones']):
+                core = p[-10:]
+                params[f"p{i}"] = f"%{core}%"
+                phone_conds.append(f"phone LIKE %(p{i})s OR mobile LIKE %(p{i})s")
+            conditions.append(f"({' OR '.join(phone_conds)})")
+
+        if criteria['emails']:
+            email_conds = [f"email ILIKE %(e{i})s" for i in range(len(criteria['emails']))]
+            conditions.append(f"({' OR '.join(email_conds)})")
+            for i, e in enumerate(criteria['emails']): params[f"e{i}"] = e
+
+        if criteria['dates']:
+            date_conds = [f"birth_date = %(d{i})s" for i in range(len(criteria['dates']))]
+            conditions.append(f"({' OR '.join(date_conds)})")
+            for i, d in enumerate(criteria['dates']): params[f"d{i}"] = d
+        elif criteria['years']:
+            year_conds = [f"birth_date ILIKE %(y{i})s" for i in range(len(criteria['years']))]
+            conditions.append(f"({' OR '.join(year_conds)})")
+            for i, y in enumerate(criteria['years']): params[f"y{i}"] = f"%{y}%"
+
+        if criteria['inns']:
+            inn_conds = [f"inn = %(inn{i})s" for i in range(len(criteria['inns']))]
+            conditions.append(f"({' OR '.join(inn_conds)})")
+            for i, inn in enumerate(criteria['inns']): params[f"inn{i}"] = inn
+
+        if not conditions:
+            tokens = [re.sub(r'[^\w]', '', t.lower()) for t in query.split() if len(re.sub(r'[^\w]', '', t)) >= 2]
+            if not tokens: return []
+            conditions = [f"hasToken(fio, %(t{i})s)" for i in range(len(tokens))]
+            for i, t in enumerate(tokens): params[f"t{i}"] = t
+
+        sql = f"SELECT * FROM {target_table} WHERE {' AND '.join(conditions)} LIMIT 1000"
+        client = await self.get_client()
+        logger.info(f"Executing Multi-Search [level {pivot_level}]: {query}")
 
         try:
             async with self.semaphore:

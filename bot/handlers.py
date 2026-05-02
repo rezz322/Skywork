@@ -465,58 +465,91 @@ async def handle_all_text(message: types.Message):
     # Якщо це не команда, то це ПОШУК
     if text.startswith("/"): return
 
-    # Логіка пошуку (аналогічна попередній версії)
+    # Логіка пошуку
     current_mode = await r.get(f"user_mode:{user_id}") or "ua"
     table_name = "global_search_ua" if current_mode == "ua" else "global_search_ru"
     
+    # ПЕРЕВІРКА НА ФІЛЬТР (формат Запит : Фільтр)
+    if ":" in text:
+        parts = text.split(":", 1)
+        main_query = parts[0].strip()
+        filter_val = parts[1].strip()
+        
+        if not main_query or not filter_val:
+            await message.answer("❌ <b>Помилка!</b>\nВведіть і запит, і фільтр через двокрапку.", parse_mode="HTML")
+            return
+            
+        msg = await message.answer(f"🔍 <b>Запит:</b> <code>{main_query}</code>\n🎯 <b>Фільтр:</b> <code>{filter_val}</code>\n⏳ <i>Обробка...</i>", parse_mode="HTML")
+        
+        try:
+            results_matrix = await search_across_tables(main_query, table=table_name)
+            filter_lower = filter_val.lower()
+            
+            filtered_matrix = []
+            count = 0
+            for table_data in results_matrix:
+                if not table_data: continue
+                source = table_data[0]
+                rows = table_data[1:]
+                matching_rows = []
+                for row in rows:
+                    row_str = " ".join(str(v) for v in row.values()).lower()
+                    if filter_lower in row_str:
+                        matching_rows.append(row)
+                        count += 1
+                if matching_rows:
+                    filtered_matrix.append([source] + matching_rows)
+            
+            if count == 0:
+                await msg.edit_text(f"❌ <b>Нічого не знайдено.</b>\nЗа запитом <code>{main_query}</code> з фільтром <code>{filter_val}</code> результатів немає.", parse_mode="HTML")
+                return
+
+            now = time.strftime("%Y-%m-%d %H:%M:%S")
+            analyzed_html = generate_html_report(f"{main_query} + {filter_val}", filtered_matrix, now, analyzed=True)
+            
+            filename = f"report_{user_id}_{int(time.time())}.html"
+            with open(filename, "w", encoding="utf-8") as f: f.write(analyzed_html)
+            
+            await msg.delete()
+            await bot.send_document(
+                message.chat.id, FSInputFile(filename), 
+                caption=f"✅ <b>Звіт готовий!</b>\n🔍 Запит: <code>{main_query}</code>\n🎯 Фільтр: <code>{filter_val}</code>\n📊 Знайдено: <b>{count}</b>", 
+                parse_mode="HTML"
+            )
+            if os.path.exists(filename): os.remove(filename)
+            return
+        except Exception as e:
+            logger.error(f"Filtered search error: {e}")
+            await message.answer("❌ Помилка пошуку.")
+            return
+
+    # ЗВИЧАЙНИЙ ПОШУК
     msg = await message.answer(f"🔍 Шукаю: <code>{text}</code>...", parse_mode="HTML")
     
     results_matrix = await search_across_tables(text, table=table_name)
     local_results_count = sum(len(table_data) - 1 for table_data in results_matrix if len(table_data) > 1)
     
     if local_results_count > 0:
+        import json
+        # Зберігаємо результати (про всяк випадок)
+        await r.set(f"last_results:{user_id}", json.dumps(results_matrix, default=str), ex=3600)
+        
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         analyzed_html = generate_html_report(text, results_matrix, now, analyzed=True)
-        raw_html = generate_html_report(text, results_matrix, now, analyzed=False)
-        
         report_id = f"{user_id}_{int(time.time())}"
-        await r.set(f"temp_raw_report:{report_id}", raw_html, ex=300)
-        
         filename = f"report_{report_id}.html"
         with open(filename, "w", encoding="utf-8") as f: f.write(analyzed_html)
         
         await msg.edit_text(f"✅ Знайдено: <b>{local_results_count}</b>", parse_mode="HTML")
         try:
-            await bot.send_document(message.chat.id, FSInputFile(filename), caption="📊 <b>Аналізований звіт</b>", parse_mode="HTML")
+            await bot.send_document(message.chat.id, FSInputFile(filename), caption=f"📊 <b>Звіт: {text}</b>", parse_mode="HTML")
         except Exception as e:
             logger.error(f"Failed to send report to {message.chat.id}: {e}")
         
         if os.path.exists(filename): os.remove(filename)
-        
-        builder = InlineKeyboardBuilder()
-        builder.button(text="🔍 Подивитися всі записи", callback_data=f"get_raw:{report_id}")
-        await message.answer("Повний список доступний 5 хвилин:", reply_markup=builder.as_markup())
     else:
         await msg.edit_text(messages.SEARCH_NOT_FOUND, parse_mode="HTML")
 
-# Коллбеки для Raw звіту
-@router.callback_query(F.data.startswith("get_raw:"))
-async def handle_get_raw(callback: types.CallbackQuery):
-    report_id = callback.data.split(":")[1]
-    raw_html = await r.get(f"temp_raw_report:{report_id}")
-    if not raw_html:
-        await callback.answer("⏳ 5 хвилин минуло.", show_alert=True)
-        return
-    
-    filename = f"raw_{report_id}.html"
-    with open(filename, "w", encoding="utf-8") as f: f.write(raw_html)
-    try:
-        await bot.send_document(callback.message.chat.id, FSInputFile(filename), caption="📄 <b>Повний список</b>", parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Failed to send raw report: {e}")
-        
-    if os.path.exists(filename): os.remove(filename)
-    await callback.answer()
 
 async def search_across_tables(query, table):
     from search_service import search_across_tables as sat

@@ -109,7 +109,7 @@ def get_merged_persons(results_matrix):
 
                         if k in p['merged_data']:
                             if isinstance(p['merged_data'][k], list):
-                                if new_val not in p['merged_data'][k]:
+                                if new_val not in p['merged_data'][k] and len(p['merged_data'][k]) < 10:
                                     p['merged_data'][k].append(new_val)
                             else:
                                 if new_val != p['merged_data'][k]:
