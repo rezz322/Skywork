@@ -12,6 +12,11 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - osint_net
 
@@ -35,10 +40,11 @@ services:
       - clickhouse_logs:/var/log/clickhouse
       - ./clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: [ "CMD", "wget", "--spider", "-q", "localhost:8123/ping" ]
+      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     networks:
       - osint_net
 
@@ -48,6 +54,11 @@ services:
     restart: always
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - osint_net
 
@@ -64,8 +75,10 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_NAME: ${POSTGRES_DB}
     depends_on:
-      - postgres
-      - clickhouse
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -89,7 +102,8 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - osint_net
 
@@ -116,10 +130,14 @@ services:
       SUPER_ADMIN_IDS: ${SUPER_ADMIN_IDS}
       DOCKER_ENV: "true"
     depends_on:
-      - redis
-      - db-service
-      - postgres
-      - clickhouse
+      redis:
+        condition: service_healthy
+      db-service:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
