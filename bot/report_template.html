@@ -3,78 +3,345 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>skywork Звіт: {{ query }}</title>
+    <title>OSINT ЗВІТ: {{ query }}</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;600;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap');
+        
         :root {
-            --bg-body: #0a0a0a; --bg-card: #141414;
-            --accent-color: #00e5ff; --accent-dim: rgba(0, 229, 255, 0.1);
-            --text-primary: #ffffff; --text-secondary: #a0a0a0;
-            --border-color: #222; --success-color: #00ff9d;
-            --font-mono: 'JetBrains Mono', monospace; --font-sans: 'Inter', sans-serif;
+            --bg-primary: #0a0a0b;
+            --bg-secondary: #141416;
+            --accent: #00ffff;
+            --accent-dim: rgba(0, 255, 255, 0.1);
+            --text-primary: #ffffff;
+            --text-secondary: #88888e;
+            --border: #222225;
+            --card-bg: #1a1a1d;
         }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background-color: var(--bg-body); color: var(--text-primary); font-family: var(--font-sans); font-size: 13px; line-height: 1.4; padding: 30px; }
-        .header { border-bottom: 2px solid var(--accent-color); padding-bottom: 15px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: flex-end; }
-        .brand { font-family: var(--font-mono); font-size: 24px; font-weight: 800; color: var(--accent-color); letter-spacing: 2px; }
-        .info-value { color: var(--accent-color); font-family: var(--font-mono); font-size: 13px; }
-        .summary-card { background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 15px; margin-bottom: 30px; }
-        .summary-data { font-size: 18px; font-weight: 700; color: var(--accent-color); }
-        .source-title { font-family: var(--font-mono); font-size: 16px; margin: 30px 0 15px; padding-left: 10px; border-left: 3px solid var(--accent-color); color: var(--text-primary); }
-        
-        .results-grid { 
-            display: grid; 
-            grid-template-columns: repeat(2, 1fr); 
-            gap: 15px; 
-        }
-        
-        .result-card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; }
-        .card-header { background: rgba(255, 255, 255, 0.03); padding: 8px 15px; font-family: var(--font-mono); font-size: 10px; color: #555; border-bottom: 1px solid var(--border-color); }
-        .card-body { padding: 12px 15px; }
-        .data-row { display: flex; padding: 4px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.02); }
-        .data-label { flex: 0 0 35%; color: var(--text-secondary); font-size: 11px; }
-        .data-value { flex: 1; font-family: var(--font-mono); color: #eee; font-size: 12px; word-break: break-all; }
 
-        @media (max-width: 800px) { .results-grid { grid-template-columns: 1fr; } }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            padding: 30px;
+            line-height: 1.5;
+        }
+
+        .header {
+            border-bottom: 2px solid var(--accent);
+            padding-bottom: 20px;
+            margin-bottom: 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+        }
+
+        .header h1 { font-size: 20px; letter-spacing: 2px; color: var(--accent); font-weight: 800; text-transform: uppercase; }
+        .header-meta { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-secondary); text-align: right; }
+
+        /* Dossier Style */
+        .dossier-container {
+            max-width: 1000px;
+            margin: 0 auto 60px auto;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        }
+
+        .dossier-watermark {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%) rotate(-45deg);
+            font-size: 100px;
+            font-weight: 900;
+            color: rgba(255, 255, 255, 0.02);
+            pointer-events: none;
+            white-space: nowrap;
+        }
+
+        .dossier-header {
+            padding: 30px 40px;
+            background: linear-gradient(to bottom, #1e1e22, var(--bg-secondary));
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .dossier-header h2 { font-size: 32px; font-weight: 800; text-transform: uppercase; letter-spacing: -1px; }
+
+        .dossier-body { padding: 40px; position: relative; z-index: 2; }
+
+        .dossier-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; }
+
+        .section-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--accent);
+            letter-spacing: 1px;
+            margin-bottom: 20px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--accent-dim);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-transform: uppercase;
+        }
+
+        .data-group { margin-bottom: 25px; }
+        .data-label { font-size: 9px; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 6px; letter-spacing: 1px; }
+        
+        .value-list { 
+            display: flex; 
+            flex-wrap: wrap; 
+            gap: 8px; 
+            max-height: 250px; 
+            overflow-y: auto;
+            padding-right: 5px;
+        }
+
+        .value-list::-webkit-scrollbar { width: 4px; }
+        .value-list::-webkit-scrollbar-track { background: transparent; }
+        .value-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+        .value-list::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+        
+        .mini-block {
+            background: #111;
+            border: 1px solid #333;
+            padding: 5px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #ddd;
+            font-family: 'JetBrains Mono', monospace;
+            transition: border-color 0.2s;
+        }
+        .mini-block:hover { border-color: var(--accent); }
+
+        /* Grid for raw data */
+        .results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
+        .result-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 20px; }
+        .raw-label { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 4px; }
+        .raw-value { font-size: 13px; font-family: 'JetBrains Mono', monospace; margin-bottom: 12px; word-break: break-all; }
+
+        /* Filter Section */
+        .filter-section {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: flex-end;
+            position: sticky;
+            top: 10px;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+            background: rgba(20, 20, 22, 0.8);
+        }
+
+        .filter-group {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .filter-group label {
+            display: block;
+            font-size: 10px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            margin-bottom: 8px;
+            letter-spacing: 1px;
+        }
+
+        .filter-input {
+            width: 100%;
+            background: #111;
+            border: 1px solid #333;
+            color: #fff;
+            padding: 10px 15px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .filter-input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-dim);
+        }
+
+        @media (max-width: 768px) {
+            body { padding: 15px; }
+            .dossier-header { flex-direction: column; text-align: center; padding: 20px; gap: 15px; }
+            .dossier-header h2 { font-size: 24px; }
+            .dossier-grid { grid-template-columns: 1fr; gap: 30px; }
+            .dossier-body { padding: 20px; }
+            .mini-block { font-size: 12px; padding: 4px 10px; }
+            .filter-section { flex-direction: column; align-items: stretch; }
+        }
     </style>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const filterInput = document.getElementById('filter-any');
+            const dossiers = document.querySelectorAll('.dossier-container');
+            const cards = document.querySelectorAll('.result-card');
+
+            function applyFilter() {
+                const query = filterInput.value.toLowerCase();
+
+                // Handle Dossiers
+                dossiers.forEach(dossier => {
+                    const text = dossier.textContent.toLowerCase();
+                    if (!query || text.includes(query)) {
+                        dossier.style.display = 'block';
+                    } else {
+                        dossier.style.display = 'none';
+                    }
+                });
+
+                // Handle Cards
+                cards.forEach(card => {
+                    const text = card.textContent.toLowerCase();
+                    if (!query || text.includes(query)) {
+                        card.style.display = 'block';
+                    } else {
+                        card.style.display = 'none';
+                    }
+                });
+            }
+
+            filterInput.addEventListener('input', applyFilter);
+        });
+    </script>
 </head>
 <body>
-    <header class="header">
-        <div class="brand">skywork</div>
-        <div class="info-value">{{ current_time }}</div>
-    </header>
-
-    <div class="summary-card">
-        <div class="summary-data">{{ query }}</div>
-        <div style="margin-top:8px; font-size: 11px; color: var(--text-secondary);">
-            ЗНАЙДЕНО: <span style="color: var(--success-color)">{{ total_records }}</span>
-            {% if total_records >= 1000 %}
-                <span style="color: #ff9800; margin-left: 15px;">[!] LIMIT 1,000 REACHED</span>
-            {% endif %}
+    <div class="header">
+        <div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 28px; font-weight: 900; color: var(--accent); letter-spacing: 3px; line-height: 1;">SKYWORK</div>
+            <div style="font-size: 10px; color: var(--text-secondary); margin-top: 5px; letter-spacing: 1px;">OSINT РОЗВІДКА // ІНТЕЛЕКТУАЛЬНИЙ ЗВІТ</div>
+        </div>
+        <div class="header-meta">
+            ЗАПИТ: {{ query }}<br>
+            ЧАС ГЕНЕРАЦІЇ: {{ current_time }}
         </div>
     </div>
 
-    {% for table_data in results %}
-        {% if table_data|length > 1 %}
-            <section class="source-section">
-                <h2 class="source-title">{{ table_data[0] | upper }}</h2>
-                <div class="results-grid">
-                    {% for row in table_data[1:] %}
-                        <div class="result-card">
-                            <div class="card-header">#{{ loop.index }}</div>
-                            <div class="card-body">
-                                {% for key, value in row.items() %}
-                                    <div class="data-row">
-                                        <div class="data-label">{{ key }}</div>
-                                        <div class="data-value">{{ value }}</div>
+    <div class="filter-section">
+        <div class="filter-group">
+            <label for="filter-any">Загальний фільтр</label>
+            <input type="text" id="filter-any" class="filter-input" placeholder="Введіть будь-які дані (ПІБ, ІПН, паспорт, телефон...)">
+        </div>
+    </div>
+
+    {% if is_analyzed %}
+        {% for person in persons %}
+            <div class="dossier-container">
+                <div class="dossier-watermark">КОНФІДЕНЦІЙНО</div>
+                
+                <div class="dossier-header">
+                    <div>
+                        <div style="font-size: 10px; color: var(--accent); font-family: 'JetBrains Mono', monospace;">АНАЛІТИЧНЕ ДОСЬЄ</div>
+                        <h2>{{ person.fio_display }}</h2>
+                    </div>
+                </div>
+
+                <div class="dossier-body">
+                    <div class="dossier-grid">
+                        <!-- Left: Identification -->
+                        <div>
+                            <div class="section-title">ІДЕНТИФІКАЦІЙНІ ДАНІ</div>
+                            {% set id_labels = {'birth_date': 'ДАТА НАРОДЖЕННЯ', 'passport': 'ПАСПОРТНІ ДАНІ', 'inn': 'ІПН / РНОКПП', 'snils': 'СНІЛС'} %}
+                            {% for key in ['birth_date', 'passport', 'inn', 'snils'] %}
+                                {% if person.merged_data[key] %}
+                                    <div class="data-group">
+                                        <div class="data-label">{{ id_labels[key] or key }}</div>
+                                        <div class="value-list" data-type="{{ key }}">
+                                            {% for val in person.merged_data[key] %}
+                                                <div class="mini-block">{{ val }}</div>
+                                            {% endfor %}
+                                        </div>
                                     </div>
+                                {% endif %}
+                            {% endfor %}
+                        </div>
+
+                        <!-- Right: Contacts -->
+                        <div>
+                            <div class="section-title">КОНТАКТИ ТА ЛОКАЦІЇ</div>
+                            {% set contact_labels = {'phone': 'ТЕЛЕФОН', 'mobile': 'МОБІЛЬНИЙ', 'address': 'АДРЕСА РЕЄСТРАЦІЇ', 'email': 'EMAIL'} %}
+                            {% for key in ['phone', 'mobile', 'address', 'email'] %}
+                                {% if person.merged_data[key] %}
+                                    <div class="data-group">
+                                        <div class="data-label">{{ contact_labels[key] or key }}</div>
+                                        <div class="value-list" data-type="{{ key }}">
+                                            {% for val in person.merged_data[key] %}
+                                                <div class="mini-block">{{ val }}</div>
+                                            {% endfor %}
+                                        </div>
+                                    </div>
+                                {% endif %}
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <!-- Additional Section -->
+                    <div style="margin-top: 30px;">
+                        <div class="section-title">ДОДАТКОВІ АТРИБУТИ</div>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px;">
+                            {% for key, value in person.merged_data.items() %}
+                                {% if key not in ['raw_data', 'fio', 'birth_date', 'passport', 'inn', 'snils', 'phone', 'mobile', 'address', 'email', 'source_table'] and value %}
+                                    <div style="background: rgba(255,255,255,0.02); padding: 12px; border: 1px solid var(--border); border-radius: 4px;">
+                                        <div class="data-label">{{ key | upper }}</div>
+                                        <div class="value-list">
+                                            {% for val in value %}
+                                                <div class="mini-block" style="border: none; background: none; padding: 0; font-size: 12px; color: #aaa;">{{ val }}</div>
+                                            {% endfor %}
+                                        </div>
+                                    </div>
+                                {% endif %}
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 40px; padding-top: 20px; border-top: 1px dashed #333; display: flex; justify-content: space-between; align-items: flex-end;">
+                        <div>
+                            <div class="data-label">ПЕРЕВІРЕНІ ДЖЕРЕЛА</div>
+                            <div class="value-list">
+                                {% for src in person.merged_data.source_table %}
+                                    <div style="font-size: 10px; color: #666; font-family: 'JetBrains Mono', monospace; background: #111; padding: 2px 8px; border-radius: 2px;">{{ src | upper }}</div>
                                 {% endfor %}
                             </div>
                         </div>
+                        <div style="font-size: 10px; color: #333; font-family: 'JetBrains Mono', monospace;">
+                            ПОВ'ЯЗАНО ЗАПИСІВ: {{ person.count }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+    {% else %}
+        <div class="results-grid">
+            {% for row in results %}
+                <div class="result-card">
+                    <div style="font-size: 10px; color: var(--accent); margin-bottom: 15px; font-family: 'JetBrains Mono', monospace; display: flex; justify-content: space-between;">
+                        <span>ЗАПИС #{{ loop.index }}</span>
+                        <span style="color: #444;">ДЖЕРЕЛО: {{ row.source_table | upper }}</span>
+                    </div>
+                    {% for key, value in row.items() %}
+                        {% if key not in ['raw_data', 'source_table'] and value %}
+                            <div class="raw-label">{{ key | upper }}</div>
+                            <div class="raw-value">{{ value }}</div>
+                        {% endif %}
                     {% endfor %}
                 </div>
-            </section>
-        {% endif %}
-    {% endfor %}
+            {% endfor %}
+        </div>
+    {% endif %}
 </body>
 </html>

@@ -2,84 +2,29 @@ import re
 from jinja2 import Template
 import messages
 
-def generate_html_report(query, results, current_time_str):
-    cleaned_results = []
-    has_letters = re.compile(r'[a-zA-Zа-яА-ЯёЁ]')
+def normalize_fio(s):
+    if not s: return ""
+    s = str(s).lower().strip()
+    replacements = {'і': 'и', 'ї': 'и', 'є': 'е', 'ґ': 'г'}
+    for k, v in replacements.items():
+        s = s.replace(k, v)
+    return s
 
-    for table_data in results:
-        if len(table_data) <= 1:
-            continue
-            
-        source_name = str(table_data[0]).lower()
-        is_restricted_source = "відомості про фізичних осіб" in source_name
+def clean_id(s):
+    if not s: return ""
+    return re.sub(r'[^\d]', '', str(s))
 
-        new_table_data = [table_data[0]] 
-        for row in table_data[1:]:
-            new_row = {}
-            
-            raw_val = row.get('raw_data', '')
-            if raw_val and str(raw_val).strip() not in ["", "{}", "[]", "None", "null"]:
-                try:
-                    import json
-                    data = json.loads(str(raw_val))
-                    if isinstance(data, dict):
-                        for rk, rv in data.items():
-                            val = rv
-                            if isinstance(rv, str) and (rv.strip().startswith('{') or rv.strip().startswith('[')):
-                                try: val = json.loads(rv)
-                                except: pass
-                            
-                            display_key = rk
-                            if rk == 'SQL_COL_13': display_key = "Доп. інформація"
-                            elif rk.startswith('SQL_COL_'): display_key = f"Инфо ({rk.split('_')[-1]})"
-                            
-                            if isinstance(val, dict):
-                                for ik, iv in val.items():
-                                    if iv: new_row[f"{display_key}: {ik}"] = iv
-                            else:
-                                if val: new_row[display_key] = val
-                    else:
-                        new_row["Доп. інформація"] = raw_val
-                except:
-                    new_row["Доп. інформація"] = raw_val
+def is_garbage_date(s):
+    if not s: return True
+    # Если в дате есть буквы - это мусор (адрес или имя)
+    if any(c.isalpha() for c in str(s)):
+        return True
+    # Если дата слишком короткая или слишком длинная для реальной даты
+    s_clean = clean_id(s)
+    if len(s_clean) < 4: return True
+    return False
 
-            for k, v in row.items():
-                if not v or k == 'raw_data': continue
-                val_str = str(v).strip()
-                
-                if val_str.lower() in ["", "none", "null", "nan", "undefined"]:
-                    continue
-                
-                if is_restricted_source and k.lower() in ['address', 'birth_date', 'адрес', 'дата народження']:
-                    continue
-
-                if k == 'birth_date' and has_letters.search(val_str):
-                    continue
-                
-                if k.lower() in ['phone', 'mobile', 'telephone', 'телефон', 'номер']:
-                    if ',' in val_str or ';' in val_str:
-                        parts = re.split(r'[,;]', val_str)
-                        val_str = "<br>".join(p.strip() for p in parts if p.strip())
-                
-                if k in ['inn', 'snils', 'phone', 'tg_id']:
-                    parts_to_check = val_str.split("<br>")
-                    valid_parts = []
-                    for pt in parts_to_check:
-                        clean_pt = re.sub(r'[\s\-\.\(\)\+]', '', pt)
-                        if clean_pt.isdigit(): valid_parts.append(pt)
-                    if not valid_parts: continue
-                    val_str = "<br>".join(valid_parts)
-                
-                new_row[k] = val_str
-            
-            if new_row:
-                new_table_data.append(new_row)
-        
-        if len(new_table_data) > 1:
-            cleaned_results.append(new_table_data)
-
-    total_records = sum(len(table_data) - 1 for table_data in cleaned_results)
-    
+def generate_html_report(query, results, current_time_str, analyzed=True):
     import os
     try:
         template_path = os.path.join(os.path.dirname(__file__), 'report_template.html')
@@ -87,7 +32,117 @@ def generate_html_report(query, results, current_time_str):
             template_content = f.read()
         template = Template(template_content)
     except Exception:
-        # Фоллбек на старий спосіб (якщо файл не знайдено)
-        template = Template("<html><body>Error loading template</body></html>")
+        return "<html><body>Error loading template</body></html>"
+
+    if analyzed:
+        persons = get_merged_persons(results)
+        total_records = sum(p['count'] for p in persons)
+        return template.render(query=query, persons=persons, total_records=total_records, current_time=current_time_str, is_analyzed=True)
+    else:
+        # Просто плоский список всех записей из всех таблиц
+        all_rows = []
+        for table_data in results:
+            if len(table_data) > 1:
+                for row in table_data[1:]:
+                    all_rows.append(dict(row))
         
-    return template.render(query=query, results=cleaned_results, total_records=total_records, current_time=current_time_str)
+        return template.render(query=query, results=all_rows, total_records=len(all_rows), current_time=current_time_str, is_analyzed=False)
+
+def get_merged_persons(results_matrix):
+    persons = []
+    
+    for table_data in results_matrix:
+        if len(table_data) <= 1: continue
+        
+        source_name = str(table_data[0]).strip().lower()
+        ignore_fields = ["birth_date", "address"] if "відомості_про_фізичних_осіб" in source_name else []
+        
+        for row in table_data[1:]:
+            current_row = dict(row)
+            for f in ignore_fields:
+                current_row[f] = ""
+
+            fio_raw = str(current_row.get('fio', '')).strip()
+            fio_norm = normalize_fio(fio_raw)
+            inn = clean_id(current_row.get('inn', ''))
+            phone = clean_id(current_row.get('phone', '') or current_row.get('mobile', ''))
+            
+            bday_raw = str(current_row.get('birth_date', '')).strip()
+            # Проверка на мусор в дате рождения
+            bday = bday_raw if not is_garbage_date(bday_raw) else ""
+            
+            if not fio_norm and not inn and not phone: continue
+                
+            found = False
+            for p in persons:
+                # Строгая проверка по ИНН: если оба ИНН есть и они разные - это РАЗНЫЕ люди
+                if inn and p['inn'] and inn != p['inn']:
+                    continue
+                
+                match_by_inn = (inn and p['inn'] == inn)
+                match_by_phone = (phone and p['phone'] == phone)
+                match_by_fio = (fio_norm and p['fio_norm'] == fio_norm)
+                
+                if match_by_inn:
+                    found = True
+                elif match_by_phone:
+                    # Если ИНН нет у одного из них, можем объединить по телефону
+                    found = True
+                elif match_by_fio:
+                    # Если ИНН нет у одного из них, можем объединить по ФИО + ДР
+                    if not bday or not p['birth_date'] or bday == p['birth_date']:
+                        found = True
+                
+                if found:
+                    p['count'] += 1
+                    for k, v in current_row.items():
+                        new_val = str(v).strip()
+                        if not new_val or new_val.lower() in ["", "none", "null", "0"]: continue
+                        
+                        # Фильтр телефонов: минимум 10 цифр
+                        if k.lower() in ["phone", "mobile", "telephone", "номер"]:
+                            new_val = clean_id(new_val)
+                            if len(new_val) < 10: continue
+                        
+                        # Фильтр дат в дополнительных полях
+                        if k.lower() == "birth_date" and is_garbage_date(new_val): continue
+
+                        if k in p['merged_data']:
+                            if isinstance(p['merged_data'][k], list):
+                                if new_val not in p['merged_data'][k]:
+                                    p['merged_data'][k].append(new_val)
+                            else:
+                                if new_val != p['merged_data'][k]:
+                                    p['merged_data'][k] = [p['merged_data'][k], new_val]
+                        else:
+                            p['merged_data'][k] = [new_val]
+                    
+                    if not p['inn'] and inn: p['inn'] = inn
+                    if not p['phone'] and phone: p['phone'] = phone
+                    if not p['birth_date'] and bday: p['birth_date'] = bday
+                    break
+            
+            if not found:
+                merged_init = {}
+                for k, v in current_row.items():
+                    val = str(v).strip()
+                    if not val or val.lower() in ["", "none", "null", "0"]: continue
+                    
+                    if k.lower() in ["phone", "mobile", "telephone", "номер"]:
+                        val = clean_id(val)
+                        if len(val) < 10: continue
+                    
+                    if k.lower() == "birth_date" and is_garbage_date(val): continue
+                    
+                    merged_init[k] = [val]
+
+                persons.append({
+                    'fio_display': fio_raw,
+                    'fio_norm': fio_norm,
+                    'birth_date': bday,
+                    'inn': inn,
+                    'phone': phone,
+                    'count': 1,
+                    'merged_data': merged_init
+                })
+    return persons

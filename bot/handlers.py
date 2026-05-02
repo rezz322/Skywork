@@ -2,337 +2,522 @@ import os
 import re
 import asyncio
 import logging
+import time
 from aiogram import types, F, Router
-from aiogram.filters import Command
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command, CommandObject
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 import messages
-from config import bot, r, AUTH_PASSWORD
-from database import register_user, check_subscription, get_user_info, authorize_user
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from config import bot, r, SUPER_ADMIN_IDS
+from database import (
+    register_user, get_user, get_user_by_username, set_user_password,
+    check_auth, validate_password, update_user_phone, set_role,
+    get_all_by_role, get_all_users, get_users_by_admin, is_super_admin, get_db_stats, ban_user, delete_user
+)
 from utils import generate_html_report
-from search_service import search_across_tables, service as search_service
-import httpx
+from search_service import service as search_service
 
 router = Router()
 logger = logging.getLogger("bot.handlers")
 
-def get_main_keyboard():
+# --- Помічники ---
+async def notify_super_admins(text: str):
+    for admin_id in SUPER_ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, f"🔔 <b>СИСТЕМНЕ ПОВІДОМЛЕННЯ</b>\n\n{text}", parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to notify super admin {admin_id}: {e}")
+
+def get_main_keyboard(user_id):
     builder = ReplyKeyboardBuilder()
-    builder.row(types.KeyboardButton(text="🔍 Пошук"), types.KeyboardButton(text="👤 Кабінет"))
+    builder.row(types.KeyboardButton(text="🔍 Пошук"))
     builder.row(types.KeyboardButton(text="🌐 Режим пошуку"))
+    
+    # Кнопка для адмінів та супер-адмінів
+    user = get_user(user_id)
+    if is_super_admin(user_id) or (user and user.get('role') == 'admin'):
+        builder.row(types.KeyboardButton(text="⚙️ Адмін-панель"))
+        
     return builder.as_markup(resize_keyboard=True)
 
-# def get_pay_keyboard():
-#     builder = InlineKeyboardBuilder()
-#     builder.button(text="1 Місяць ($10)", callback_data="pay_period_1")
-#     builder.button(text="3 Місяці ($30)", callback_data="pay_period_3")
-#     builder.button(text="6 Місяців ($60)", callback_data="pay_period_6")
-#     builder.adjust(1)
-#     return builder.as_markup()
+@router.message(F.text == "⚙️ Адмін-панель")
+async def cmd_admin_panel(message: types.Message):
+    await show_admin_panel(message, uid=message.from_user.id, edit=False)
 
-# def get_coins_keyboard(period):
-#     builder = InlineKeyboardBuilder()
-#     # Список популярных монет в CryptoBot
-#     coins = ["USDT", "TON", "TRX", "BTC", "ETH"]
-#     for coin in coins:
-#         builder.button(text=coin, callback_data=f"pay_coin_{period}_{coin}")
-#     builder.button(text="⬅️ Назад", callback_data="pay_back_to_periods")
-#     builder.adjust(2)
-#     return builder.as_markup()
+async def show_admin_panel(message: types.Message, uid: int, edit: bool = False):
+    user = get_user(uid)
+    if not is_super_admin(uid) and (not user or user['role'] != 'admin'):
+        return
+
+    builder = InlineKeyboardBuilder()
+    if is_super_admin(uid):
+        builder.row(InlineKeyboardButton(text="👥 Усі користувачі", callback_data="admin_users_all"))
+        builder.row(InlineKeyboardButton(text="📂 Мої учасники", callback_data="admin_users_my"))
+        builder.row(InlineKeyboardButton(text="👮 Список адмінів", callback_data="admin_admins"))
+    else:
+        builder.row(InlineKeyboardButton(text="👥 Мої користувачі", callback_data="admin_users_my"))
+        
+    builder.row(InlineKeyboardButton(text="📊 Статистика бази", callback_data="admin_stats"))
+    builder.row(InlineKeyboardButton(text="📝 Як реєструвати?", callback_data="admin_help"))
+    
+    text = "🛠 <b>Панель керування SKYWORK</b>\n\nВиберіть потрібний розділ:"
+    if edit:
+        await message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+# --- Обробка авторизації та входу ---
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
-    register_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    is_active, _ = check_subscription(message.from_user.id)
+    user_id = message.from_user.id
+    register_user(user_id, message.from_user.username, message.from_user.first_name)
     
-    if not is_active:
-        await message.answer("⚠️ **Доступ обмежено!**\n\nБот захищений паролем. Будь ласка, введіть пароль для доступу до функцій пошуку.", parse_mode="Markdown")
+    if check_auth(user_id):
+        await message.answer(messages.START_MESSAGE, reply_markup=get_main_keyboard(user_id))
     else:
-        await message.answer(messages.START_MESSAGE, reply_markup=get_main_keyboard())
+        await message.answer("🔑 <b>Доступ обмежено!</b>\n\nБудь ласка, введіть персональний пароль.", parse_mode="HTML")
 
-@router.message(Command("stats", "статс"))
-async def cmd_stats(message: types.Message):
-    is_active, _ = check_subscription(message.from_user.id)
-    if not is_active:
-        await message.answer("⚠️ **Доступ обмежено!**\nБудь ласка, введіть пароль.", parse_mode="Markdown")
+@router.message(F.contact)
+async def handle_contact(message: types.Message):
+    user_id = message.from_user.id
+    if not await r.get(f"user_temp_auth:{user_id}"): return
+    
+    phone = message.contact.phone_number
+    update_user_phone(user_id, phone)
+    await r.delete(f"user_temp_auth:{user_id}")
+    
+    await message.answer("✅ <b>Верифікація успішна!</b>", parse_mode="HTML", reply_markup=get_main_keyboard(user_id))
+    await notify_super_admins(f"👤 <b>Новий вхід!</b>\nЮзер: @{message.from_user.username}\nТелефон: {phone}")
+
+# --- Коллбеки Адмін-панелі ---
+@router.callback_query(F.data == "admin_users_all")
+async def cb_admin_users_all(callback: types.CallbackQuery):
+    await cmd_users(callback.message, from_user_id=callback.from_user.id, mode="all", edit=True)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_users_my")
+async def cb_admin_users_my(callback: types.CallbackQuery):
+    await cmd_users(callback.message, from_user_id=callback.from_user.id, mode="my", edit=True)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_admins")
+async def cb_admin_admins(callback: types.CallbackQuery):
+    await cmd_admins(callback.message, from_user_id=callback.from_user.id, edit=True)
+    await callback.answer()
+
+# --- Керування користувачами та адмінами через кнопки ---
+
+@router.callback_query(F.data.startswith("manage_user:"))
+async def cb_manage_user(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    target_id = int(parts[1])
+    mode = parts[2]
+    
+    target = get_user(target_id)
+    if not target:
+        await callback.answer("Користувача не знайдено.")
         return
-    try:
-        success, res_data = await search_service.execute_raw_sql("SELECT count() FROM global_search_n")
-        if not success or not res_data:
-            return
         
-        total_count = res_data[0][0]
-        success, sources_data = await search_service.execute_raw_sql(
-            "SELECT source_table, count() as cnt FROM global_search_n GROUP BY source_table ORDER BY cnt DESC LIMIT 15"
-        )
-        
-        import html
-        stats_msg = f"📊 <b>Статистика бази даних</b>\n\n"
-        stats_msg += f"📈 <b>Всього записів:</b> <code>{total_count:,}</code>\n\n".replace(",", " ")
-        stats_msg += f"🗂 <b>Топ-15 джерел:</b>\n"
-        
-        if success and isinstance(sources_data, list):
-            for row in sources_data:
-                source, count = row
-                source_esc = html.escape(str(source))
-                stats_msg += f"• {source_esc}: <code>{count:,}</code>\n".replace(",", " ")
-        
-        await message.answer(stats_msg, parse_mode="HTML")
-
-    except Exception as e:
-        logger.error(f"Error in cmd_stats: {e}")
-
-# @router.message(Command("pay"))
-# async def cmd_pay(message: types.Message):
-#     """Тестовая команда для создания платежа"""
-#     try:
-#         # Данные для платежа
-#         payload = {
-#             "price_amount": 10.0,
-#             "price_currency": "usd",
-#             "order_id": str(message.from_user.id),
-#             "order_description": "Підписка на OSINT бот",
-#             "success_url": "https://t.me/osrezz_3_bot", 
-#             "cancel_url": "https://t.me/osrezz_3_bot"
-#         }
-#         
-#         # Запрос к pay-service (внутри докера)
-#         async with httpx.AsyncClient() as client:
-#             response = await client.post("http://pay-service:8080/invoice/create", json=payload, timeout=10.0)
-#             
-#         if response.status_code == 200:
-#             try:
-#                 data = response.json()
-#             except Exception:
-#                 await message.answer(f"❌ Сервіс повернув некоректну відповідь: {response.text}")
-#                 return
-# 
-#             pay_url = data.get("invoice_url") or data.get("payment_url")
-#             
-#             if not pay_url and "payment_id" in data:
-#                 await message.answer(f"✅ Платіж створено!\nID: `{data['payment_id']}`\nСтатус: `{data['payment_status']}`\nСума: `{data['pay_amount']} {data['pay_currency']}`\nАдреса: `{data['pay_address']}`", parse_mode="Markdown")
-#             elif pay_url:
-#                 await message.answer(f"💳 **Посилання на оплату:**\n{pay_url}", parse_mode="Markdown")
-#             else:
-#                 await message.answer(f"✅ Результат: `{data}`", parse_mode="Markdown")
-#         else:
-#             await message.answer(f"❌ Помилка сервісу оплати ({response.status_code}):\n`{response.text}`", parse_mode="Markdown")
-#             
-#     except Exception as e:
-#         logger.error(f"Error in cmd_pay: {e}")
-#         await message.answer(f"❌ Критична помилка: {str(e)}")
-
-@router.message(F.text == "🌐 Режим пошуку")
-async def change_mode(message: types.Message):
-    is_active, _ = check_subscription(message.from_user.id)
-    if not is_active:
-        await message.answer("⚠️ **Доступ обмежено!**\nБудь ласка, введіть пароль.", parse_mode="Markdown")
-        return
-    
-    current_mode = await r.get(f"user_mode:{message.from_user.id}") or "ua"
-    new_mode = "ru" if current_mode == "ua" else "ua"
-    await r.set(f"user_mode:{message.from_user.id}", new_mode)
-    
-    mode_name = "🌍 (RU)" if new_mode == "ru" else " (UA)"
-    await message.answer(f"✅ **Режим змінено на:** {mode_name}")
-
-@router.message(F.text == "👤 Кабінет")
-async def show_cabinet(message: types.Message):
-    is_active, expiry = check_subscription(message.from_user.id)
-    if not is_active:
-        await message.answer("⚠️ **Доступ обмежено!**\nБудь ласка, введіть пароль.", parse_mode="Markdown")
-        return
-    user_info = get_user_info(message.from_user.id)
-    
-    current_mode = await r.get(f"user_mode:{message.from_user.id}") or "ua"
-    mode_name = "🌍  (RU)" if current_mode == "ru" else " (UA)"
-    
-    status_text = "✅ Активна" if is_active else "❌ Неактивна"
-    expiry_date = expiry.strftime("%d.%m.%Y %H:%M") if expiry else "Немає даних"
-    reg_date = user_info["registration_date"].strftime("%d.%m.%Y %H:%M") if user_info and user_info["registration_date"] else "Невідомо"
-    
-    await message.answer(
-        messages.CABINET_MESSAGE.format(
-            user_id=message.from_user.id,
-            status=status_text,
-            expiry=expiry_date,
-            reg_date=reg_date,
-            mode=mode_name
-        ),
-        parse_mode="Markdown"
+    text = (
+        f"👤 <b>Керування користувачем</b>\n\n"
+        f"<b>Ім'я:</b> {target['first_name'] or 'NoName'}\n"
+        f"<b>Нік:</b> @{target['username'] or '—'}\n"
+        f"<b>ID:</b> <code>{target['user_id']}</code>\n"
+        f"<b>Телефон:</b> {target['phone'] or '—'}\n"
+        f"<b>Статус:</b> {'✅ Авторизований' if target['is_authorized'] else '🔑 Очікує'}\n"
     )
-
-# @router.message(F.text == "💳 Оплатити")
-# @router.message(Command("pay"))
-# async def show_pay_options(message: types.Message):
-#     await message.answer(messages.PAY_OPTIONS_MESSAGE, reply_markup=get_pay_keyboard(), parse_mode="Markdown")
-# 
-# @router.callback_query(F.data.startswith("pay_period_"))
-# async def handle_pay_callback(callback: types.CallbackQuery):
-#     period = int(callback.data.split("_")[-1])
-#     await callback.message.edit_text(
-#         f"💎 **Виберіть валюту для оплати {period} міс.:**", 
-#         reply_markup=get_coins_keyboard(period),
-#         parse_mode="Markdown"
-#     )
-#     await callback.answer()
-# 
-# @router.callback_query(F.data == "pay_back_to_periods")
-# async def handle_back_to_periods(callback: types.CallbackQuery):
-#     await callback.message.edit_text(
-#         messages.PAY_OPTIONS_MESSAGE, 
-#         reply_markup=get_pay_keyboard(), 
-#         parse_mode="Markdown"
-#     )
-#     await callback.answer()
-# 
-# @router.callback_query(F.data.startswith("pay_coin_"))
-# async def handle_coin_callback(callback: types.CallbackQuery):
-#     # Format: pay_coin_{period}_{coin}
-#     parts = callback.data.split("_")
-#     period = int(parts[2])
-#     coin = parts[3]
-#     amount = period * 10.0
-#     
-#     await callback.message.edit_text(f"⏳ Створюю запит на оплату {period} міс. у {coin}...")
-#     
-#     try:
-#         payload = {
-#             "price_amount": amount,
-#             "asset": coin,
-#             "order_id": str(callback.from_user.id),
-#             "order_description": f"Підписка на {period} міс. для OSINT бота ({coin})"
-#         }
-#         
-#         async with httpx.AsyncClient() as client:
-#             # Используем имя сервиса из docker-compose
-#             response = await client.post("http://pay-service:8080/invoice/create", json=payload, timeout=15.0)
-#             
-#         if response.status_code == 200:
-#             data = response.json()
-#             pay_url = data.get("invoice_url") or data.get("payment_url")
-#             if pay_url:
-#                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
-#                     [InlineKeyboardButton(text="💎 Відкрити Crypto Bot", url=pay_url)]
-#                 ])
-#                 
-#                 await callback.message.answer(
-#                     f"💳 <b>Ваше посилання на оплату ({coin}):</b>\n\n" +
-#                     f"<code>{pay_url}</code>\n\n" +
-#                     f"<i>Після оплати подписка активується автоматично.</i>", 
-#                     parse_mode="HTML",
-#                     reply_markup=keyboard
-#                 )
-#             else:
-#                 await callback.message.answer("✅ Платіж створено! Відкрийте Crypto Bot для оплати.")
-#         else:
-#             await callback.message.edit_text(f"❌ Помилка сервісу оплати ({response.status_code}): {response.text}")
-#             
-#     except Exception as e:
-#         logger.error(f"Error in handle_coin_callback: {e}")
-#         await callback.message.edit_text(f"❌ Помилка: {str(e)}")
-#     
-#     await callback.answer()
-
-
-@router.message(F.text == "🔍 Пошук")
-async def search_hint(message: types.Message):
-    is_active, _ = check_subscription(message.from_user.id)
-    if not is_active:
-        await message.answer("⚠️ **Доступ обмежено!**\nБудь ласка, спочатку введіть пароль для доступу.", parse_mode="Markdown")
-        return
-    await message.answer("Просто введіть текст для пошуку (ПІБ, телефон, email тощо).")
-
-@router.message(F.text, ~Command(re.compile(r".*")))
-async def handle_search(message: types.Message):
-    register_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     
-    # ПЕРЕВІРКА АВТОРИЗАЦІЇ
-    is_active, expiry = check_subscription(message.from_user.id)
-    if not is_active:
-        if message.text.strip() == AUTH_PASSWORD:
-            authorize_user(message.from_user.id)
-            await message.answer("✅ **Авторизація успішна!**\nТепер ви можете користуватися пошуком.", parse_mode="Markdown")
-            return
-        
-        await message.answer("⚠️ **Доступ обмежено!**\nБудь ласка, введіть пароль для доступу до бота.", parse_mode="Markdown")
-        return
-
-    raw_text = message.text.strip()
-    current_mode = await r.get(f"user_mode:{message.from_user.id}") or "ua"
-    table_name = "global_search_n" if current_mode == "ua" else "global_search_ru"
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🗑 Видалити користувача", callback_data=f"del_confirm:{target_id}:{mode}"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад до списку", callback_data=f"admin_users_{mode}"))
     
-    logger.info(f"===> Поиск от {message.from_user.id} [Режим: {current_mode}]: '{raw_text}'")
-    
-    manual_field = None
-    query_content = raw_text
-    
-    prefixes = {
-        "адрес:": "address", "адреса:": "address",
-        "авто:": "transport",
-        "пасп:": "passport", "паспорт:": "passport",
-        "инн:": "inn", "іпн:": "inn",
-        "снилс:": "snils", "снілс:": "snils", "сн:": "snils", "sn:": "snils", "сс:": "snils",
-        "тел:": "phone", "номер:": "phone",
-        "email:": "email", "тг:": "tg_id",
-        "id:": "tg_id", "дата:": "birth_date"
-    }
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-    for prefix, field in prefixes.items():
-        if raw_text.lower().startswith(prefix):
-            manual_field = field
-            query_content = raw_text[len(prefix):].strip()
-            break
-
-    pre_parts = [p.strip() for p in re.split(r'[,;]', query_content) if p.strip()]
-    if len(pre_parts) > 1:
-        types_detected = [search_service.detect_search_field(p) for p in pre_parts]
-        if types_detected[0] == "fio" and any(t in ["birth_date", "phone", "passport", "inn", "snils"] for t in types_detected[1:]):
-            query_parts = [query_content.replace(",", " ")]
-        else:
-            query_parts = pre_parts
+@router.callback_query(F.data.startswith("del_confirm:"))
+async def cb_del_confirm(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    target_id = int(parts[1])
+    mode = parts[2]
+    
+    if delete_user(target_id):
+        await callback.answer("✅ Користувача видалено", show_alert=True)
+        # Повертаємось до списку
+        await cmd_users(callback.message, from_user_id=callback.from_user.id, mode=mode, edit=True)
     else:
-        query_parts = pre_parts
+        await callback.answer("❌ Помилка видалення", show_alert=True)
 
-    if not query_parts:
-        if manual_field: await message.answer("⚠️ Пустой запрос.")
+@router.callback_query(F.data.startswith("manage_admin:"))
+async def cb_manage_admin(callback: types.CallbackQuery):
+    target_id = int(callback.data.split(":")[1])
+    target = get_user(target_id)
+    
+    if not target:
+        await callback.answer("Адміна не знайдено.")
+        return
+        
+    text = (
+        f"👮 <b>Керування адміністратором</b>\n\n"
+        f"<b>Нік:</b> @{target['username'] or '—'}\n"
+        f"<b>ID:</b> <code>{target['user_id']}</code>\n"
+        f"<b>Пароль:</b> <code>{target['raw_password'] or '—'}</code>\n"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🚫 Зняти права адміна", callback_data=f"demote_confirm:{target_id}"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад до списку", callback_data="admin_admins"))
+    
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("demote_confirm:"))
+async def cb_demote_confirm(callback: types.CallbackQuery):
+    target_id = int(callback.data.split(":")[1])
+    
+    if set_role(target_id, 'user'):
+        await callback.answer("✅ Права адміна знято", show_alert=True)
+        await cmd_admins(callback.message, from_user_id=callback.from_user.id, edit=True)
+    else:
+        await callback.answer("❌ Помилка", show_alert=True)
+
+@router.callback_query(F.data == "admin_stats")
+async def cb_admin_stats(callback: types.CallbackQuery):
+    # Виклик існуючої команди статистики
+    await cmd_stats(callback.message, from_user_id=callback.from_user.id)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_help")
+async def cb_admin_help(callback: types.CallbackQuery):
+    text = (
+        "📝 <b>Як реєструвати користувача:</b>\n\n"
+        "1. Користувач повинен написати боту <code>/start</code>\n"
+        "2. Ви пишете команду: <code>/reg @username пароль</code>\n"
+        "3. Передаєте пароль користувачу.\n"
+        "4. При вході він введе пароль і надішле свій номер телефону.\n\n"
+        "<i>Пароль жорстко прив'язується до його ID.</i>"
+    )
+    await callback.message.answer(text, parse_mode="HTML")
+    await callback.answer()
+
+# --- Команди Адміністраторів ---
+
+@router.message(Command("reg"))
+async def cmd_reg(message: types.Message, command: CommandObject):
+    user = get_user(message.from_user.id)
+    if not is_super_admin(message.from_user.id) and (not user or user['role'] != 'admin'):
         return
 
-    search_label = raw_text if len(query_parts) == 1 else f"{len(query_parts)} запитів"
-    msg = await message.answer(messages.SEARCH_START.format(query=search_label), parse_mode="Markdown")
+    if not command.args or len(command.args.split()) < 2:
+        await message.answer("❌ Використання: `/reg @nick password`", parse_mode="Markdown")
+        return
 
-    master_grouped = {}
-    for part in query_parts:
-        results_matrix = await search_across_tables(part, manual_field=manual_field)
-        for table_data in results_matrix:
-            if len(table_data) > 1:
-                source = table_data[0]
-                if source not in master_grouped: master_grouped[source] = []
-                seen_hashes = {hash(frozenset(r.items())) for r in master_grouped[source]}
-                for row in table_data[1:]:
-                    row_hash = hash(frozenset(row.items()))
-                    if row_hash not in seen_hashes:
-                        master_grouped[source].append(row)
-                        seen_hashes.add(row_hash)
+    parts = command.args.split()
+    username = parts[0]
+    password = parts[1]
 
-    combined_results_matrix = []
-    for source, source_rows in master_grouped.items():
-        combined_results_matrix.append([source] + source_rows)
+    success, msg = set_user_password(username, password, message.from_user.id)
+    await message.answer(f"{'✅' if success else '❌'} {msg}")
+
+@router.message(Command("users"))
+async def cmd_users(message: types.Message, from_user_id: int = None, mode: str = "my", edit: bool = False):
+    uid = from_user_id or message.from_user.id
+    user = get_user(uid)
+    if not is_super_admin(uid) and (not user or user['role'] != 'admin'):
+        return
     
-    local_results_count = sum(len(rows) for rows in master_grouped.values())
+    if is_super_admin(uid) and mode == "all":
+        users = get_all_users()
+        title = "Усі користувачі системи"
+    else:
+        users = get_users_by_admin(uid)
+        title = "Ваші користувачі"
+        
+    if not users:
+        text = f"❌ {title} порожній."
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="🔙 В адмін-панель", callback_data="back_to_admin"))
+        if edit: await message.edit_text(text, reply_markup=builder.as_markup())
+        else: await message.answer(text, reply_markup=builder.as_markup())
+        return
+    
+    builder = InlineKeyboardBuilder()
+    for u in users:
+        # u: (user_id, username, phone, is_authorized, role, first_name)
+        status = "✅" if u[3] else "🔑"
+        name = u[5] or u[1] or str(u[0])
+        builder.row(InlineKeyboardButton(text=f"{status} {name}", callback_data=f"manage_user:{u[0]}:{mode}"))
+    
+    builder.row(InlineKeyboardButton(text="🔙 В адмін-панель", callback_data="back_to_admin"))
+    
+    text = f"👥 <b>{title}</b>\nНатисніть на користувача для керування:"
+    
+    if edit:
+        await message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+@router.callback_query(F.data == "back_to_admin")
+async def cb_back_to_admin(callback: types.CallbackQuery):
+    await show_admin_panel(callback.message, uid=callback.from_user.id, edit=True)
+    await callback.answer()
+
+@router.message(Command("stats"))
+async def cmd_stats(message: types.Message, from_user_id: int = None, edit: bool = False):
+    uid = from_user_id or message.from_user.id
+    user = get_user(uid)
+    if not is_super_admin(uid) and (not user or user['role'] != 'admin'):
+        return
+    
+    stats = get_db_stats()
+    if not stats:
+        text = "❌ Помилка отримання статистики."
+        if edit: await message.edit_text(text)
+        else: await message.answer(text)
+        return
+        
+    text = (
+        "📊 <b>Статистика системи:</b>\n\n"
+        f"👥 Всього користувачів: <code>{stats['total_users']}</code>\n"
+        f"✅ Авторизовано: <code>{stats['authorized_users']}</code>\n"
+        f"👮 Адміністраторів: <code>{stats['admins']}</code>\n"
+        f"🚫 Забанено: <code>{stats['banned_users']}</code>\n"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔙 В адмін-панель", callback_data="back_to_admin"))
+    
+    if edit:
+        await message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+@router.message(Command("admins"))
+async def cmd_admins(message: types.Message, from_user_id: int = None, edit: bool = False):
+    uid = from_user_id or message.from_user.id
+    if not is_super_admin(uid): return
+    
+    admins = get_all_by_role('admin')
+    if not admins:
+        text = "❌ Адмінів не знайдено."
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="🔙 В адмін-панель", callback_data="back_to_admin"))
+        if edit: await message.edit_text(text, reply_markup=builder.as_markup())
+        else: await message.answer(text, reply_markup=builder.as_markup())
+        return
+        
+    builder = InlineKeyboardBuilder()
+    for a in admins:
+        # a: (user_id, username, raw_password, is_banned)
+        status = "🔴" if a[3] else "🟢"
+        name = a[1] or str(a[0])
+        builder.row(InlineKeyboardButton(text=f"{status} @{name}", callback_data=f"manage_admin:{a[0]}"))
+    
+    builder.row(InlineKeyboardButton(text="🔙 В адмін-панель", callback_data="back_to_admin"))
+    
+    text = "👮 <b>Список адміністраторів</b>\nНатисніть для керування:"
+    
+    if edit:
+        await message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+@router.message(Command("add_admin", "promote"))
+async def cmd_add_admin(message: types.Message, command: CommandObject):
+    if not is_super_admin(message.from_user.id): return
+    if not command.args:
+        await message.answer("❌ Використання: `/promote @username`")
+        return
+    
+    user = get_user_by_username(command.args)
+    if not user:
+        await message.answer("❌ Користувач не знайдений в базі.")
+        return
+        
+    set_role(user['user_id'], 'admin')
+    await message.answer(f"✅ @{user['username']} призначений Адміном.")
+
+@router.message(Command("demote"))
+async def cmd_demote(message: types.Message, command: CommandObject):
+    if not is_super_admin(message.from_user.id): return
+    if not command.args:
+        await message.answer("❌ Використання: `/demote @username`")
+        return
+    
+    user = get_user_by_username(command.args)
+    if not user:
+        await message.answer("❌ Користувач не знайдений.")
+        return
+        
+    set_role(user['user_id'], 'user')
+    await message.answer(f"✅ @{user['username']} розжалуваний до звичайного Користувача.")
+
+@router.message(Command("ban", "unban"))
+async def cmd_ban_unban(message: types.Message, command: CommandObject):
+    if not is_super_admin(message.from_user.id): return
+    if not command.args: return
+    
+    is_ban = message.text.startswith("/ban")
+    user = get_user_by_username(command.args)
+    if not user:
+        await message.answer("Користувач не знайдений.")
+        return
+        
+    ban_user(user['user_id'], status=is_ban)
+    await message.answer(f"✅ Користувач @{user['username']} {'забанений' if is_ban else 'розбанений'}.")
+
+@router.message(Command("del"))
+async def cmd_del(message: types.Message, command: CommandObject):
+    admin_id = message.from_user.id
+    user_info = get_user(admin_id)
+    if not is_super_admin(admin_id) and (not user_info or user_info['role'] != 'admin'):
+        return
+        
+    if not command.args:
+        await message.answer("❌ Використання: `/del @username` або `/del ID`")
+        return
+        
+    # Спроба знайти за нікнеймом
+    target_user = get_user_by_username(command.args)
+    if not target_user and command.args.isdigit():
+        # Спроба знайти за ID
+        target_user = get_user(int(command.args))
+        
+    if not target_user:
+        await message.answer("❌ Користувача не знайдено.")
+        return
+        
+    # Перевірка прав на видалення
+    if not is_super_admin(admin_id) and target_user['created_by'] != admin_id:
+        await message.answer("❌ Ви можете видаляти лише тих користувачів, яких зареєстрували самі.")
+        return
+        
+    if delete_user(target_user['user_id']):
+        await message.answer(f"✅ Користувача {command.args} видалено.")
+    else:
+        await message.answer("❌ Помилка при видаленні.")
+
+# --- Основна логіка пошуку та авторизації ---
+
+@router.message(F.text)
+async def handle_all_text(message: types.Message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+
+    # 1. Спроба входу (якщо не авторизований)
+    if not check_auth(user_id):
+        success, status = validate_password(user_id, text)
+        
+        if success:
+            # Тимчасово позначаємо в Redis що він ввів пароль і чекаємо телефон (на 10 хв)
+            await r.set(f"user_temp_auth:{user_id}", "true", ex=600)
+            
+            # Запитуємо телефон для завершення реєстрації
+            builder = ReplyKeyboardBuilder()
+            builder.row(types.KeyboardButton(text="📱 Надіслати номер телефону", request_contact=True))
+            
+            await message.answer(
+                "🔓 <b>Пароль вірний!</b>\nДля завершення входу, будь ласка, натисніть кнопку нижче, щоб поділитися контактом.",
+                reply_markup=builder.as_markup(resize_keyboard=True),
+                parse_mode="HTML"
+            )
+            return
+        elif status.startswith("theft:"):
+            parts = status.split(":")
+            target_nick = parts[1]
+            admin_id = parts[2]
+            
+            admin_info = "Система"
+            if admin_id != 'system':
+                admin = get_user(int(admin_id))
+                admin_info = f"@{admin['username']}" if admin else f"ID:{admin_id}"
+                
+            await notify_super_admins(
+                f"🚨 <b>НЕВІДОМИЙ ВХІД!</b>\n\n"
+                f"👤 <b>Нова людина:</b> @{message.from_user.username} (ID: {user_id})\n"
+                f"🎯 <b>Власник паролю:</b> @{target_nick}\n"
+                f"👮 <b>Адмін:</b> {admin_info}"
+            )
+            await message.answer("❌ <b>Помилка доступу!</b>\nЦей пароль не належить вашому акаунту.", parse_mode="HTML")
+            return
+        else:
+            logger.info(f"Wrong password attempt by {user_id}: {text}")
+            # Сповіщення про будь-який невірний пароль
+            await notify_super_admins(
+                f"⚠️ <b>НЕВІРНИЙ ПАРОЛЬ!</b>\n\n"
+                f"👤 <b>Користувач:</b> @{message.from_user.username} (ID: {user_id})\n"
+                f"🔑 <b>Ввів:</b> <code>{text}</code>"
+            )
+            await message.answer("❌ <b>Невірний пароль!</b>\nБудь ласка, зверніться до адміністратора.", parse_mode="HTML")
+            return
+
+    # 2. Якщо вже авторизований - обробляємо команди або пошук
+    if text == "🔍 Пошук":
+        await message.answer("Просто введіть текст для пошуку (ПІБ, телефон, email тощо).")
+        return
+    
+    if text == "🌐 Режим пошуку":
+        current_mode = await r.get(f"user_mode:{user_id}") or "ua"
+        new_mode = "ru" if current_mode == "ua" else "ua"
+        await r.set(f"user_mode:{user_id}", new_mode)
+        await message.answer(f"✅ <b>Режим змінено на:</b> {'🌍 (RU)' if new_mode == 'ru' else ' (UA)'}", parse_mode="HTML")
+        return
+
+    # Якщо це не команда, то це ПОШУК
+    if text.startswith("/"): return
+
+    # Логіка пошуку (аналогічна попередній версії)
+    current_mode = await r.get(f"user_mode:{user_id}") or "ua"
+    table_name = "global_search_ua" if current_mode == "ua" else "global_search_ru"
+    
+    msg = await message.answer(f"🔍 Шукаю: <code>{text}</code>...", parse_mode="HTML")
+    
+    results_matrix = await search_across_tables(text, table=table_name)
+    local_results_count = sum(len(table_data) - 1 for table_data in results_matrix if len(table_data) > 1)
     
     if local_results_count > 0:
-        await msg.edit_text(messages.SEARCH_SUCCESS.format(count=local_results_count))
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        analyzed_html = generate_html_report(text, results_matrix, now, analyzed=True)
+        raw_html = generate_html_report(text, results_matrix, now, analyzed=False)
         
-        from datetime import datetime
-        html_content = generate_html_report(raw_text, combined_results_matrix, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        filename = f"report_{message.chat.id}_{int(asyncio.get_event_loop().time())}.html"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(html_content)
+        report_id = f"{user_id}_{int(time.time())}"
+        await r.set(f"temp_raw_report:{report_id}", raw_html, ex=300)
         
-        await bot.send_document(message.chat.id, FSInputFile(filename), caption=messages.REPORT_CAPTION.format(query=raw_text), parse_mode="Markdown")
-        if os.path.exists(filename):
-            os.remove(filename)
+        filename = f"report_{report_id}.html"
+        with open(filename, "w", encoding="utf-8") as f: f.write(analyzed_html)
+        
+        await msg.edit_text(f"✅ Знайдено: <b>{local_results_count}</b>", parse_mode="HTML")
+        try:
+            await bot.send_document(message.chat.id, FSInputFile(filename), caption="📊 <b>Аналізований звіт</b>", parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to send report to {message.chat.id}: {e}")
+        
+        if os.path.exists(filename): os.remove(filename)
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔍 Подивитися всі записи", callback_data=f"get_raw:{report_id}")
+        await message.answer("Повний список доступний 5 хвилин:", reply_markup=builder.as_markup())
     else:
-        await msg.edit_text(messages.SEARCH_NOT_FOUND)
+        await msg.edit_text(messages.SEARCH_NOT_FOUND, parse_mode="HTML")
+
+# Коллбеки для Raw звіту
+@router.callback_query(F.data.startswith("get_raw:"))
+async def handle_get_raw(callback: types.CallbackQuery):
+    report_id = callback.data.split(":")[1]
+    raw_html = await r.get(f"temp_raw_report:{report_id}")
+    if not raw_html:
+        await callback.answer("⏳ 5 хвилин минуло.", show_alert=True)
+        return
+    
+    filename = f"raw_{report_id}.html"
+    with open(filename, "w", encoding="utf-8") as f: f.write(raw_html)
+    try:
+        await bot.send_document(callback.message.chat.id, FSInputFile(filename), caption="📄 <b>Повний список</b>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Failed to send raw report: {e}")
+        
+    if os.path.exists(filename): os.remove(filename)
+    await callback.answer()
+
+async def search_across_tables(query, table):
+    from search_service import search_across_tables as sat
+    return await sat(query, table=table)

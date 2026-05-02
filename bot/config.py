@@ -17,7 +17,13 @@ logger = logging.getLogger("bot")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 DB_SERVICE_URL = os.getenv("DB_SERVICE_URL")
+# Пароль та Адміни
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "1234")
+_super_admins = os.getenv("SUPER_ADMIN_IDS", "")
+SUPER_ADMIN_IDS = [int(sid.strip()) for sid in _super_admins.split(",") if sid.strip().isdigit()]
+logger.info(f"Loaded {len(SUPER_ADMIN_IDS)} Super Admins from .env")
+if SUPER_ADMIN_IDS:
+    logger.info(f"Super Admin IDs: {SUPER_ADMIN_IDS}")
 
 if not TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN is not set. Exiting.")

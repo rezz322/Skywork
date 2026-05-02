@@ -21,7 +21,7 @@ class ClickHouseSearchService:
         self._client = None
         # Позволяем до 50 одновременных запросов к БД
         self.semaphore = asyncio.Semaphore(50)
-        self.table = "global_search_n"
+        self.table = "global_search_ua"
         
         # Настройки подключения
         self.config = {
@@ -285,16 +285,7 @@ class ClickHouseSearchService:
             
             # --- Группировка результатов ---
             grouped = {}
-            seen_hashes = set()
-            unique_rows = []
-
             for row in rows:
-                # Дедупликация строк
-                row_hash = hash(frozenset(row.items()))
-                if row_hash in seen_hashes:
-                    continue
-                seen_hashes.add(row_hash)
-                
                 source = row.get('source_table', 'unknown_source')
                 if source not in grouped: grouped[source] = []
                 grouped[source].append(row)
