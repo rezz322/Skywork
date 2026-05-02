@@ -163,7 +163,7 @@ class ClickHouseSearchService:
 
         if fio_tokens:
             for i, token in enumerate(fio_tokens):
-                conditions.append(f"hasToken(fio, %(t{i})s)")
+                conditions.append(f"hasTokenCaseInsensitive(fio, %(t{i})s)")
                 params[f"t{i}"] = token
 
         if criteria['phones']:
@@ -196,7 +196,7 @@ class ClickHouseSearchService:
         if not conditions:
             tokens = [re.sub(r'[^\w]', '', t.lower()) for t in query.split() if len(re.sub(r'[^\w]', '', t)) >= 2]
             if not tokens: return []
-            conditions = [f"hasToken(fio, %(t{i})s)" for i in range(len(tokens))]
+            conditions = [f"hasTokenCaseInsensitive(fio, %(t{i})s)" for i in range(len(tokens))]
             for i, t in enumerate(tokens): params[f"t{i}"] = t
 
         sql = f"SELECT * FROM {target_table} WHERE {' AND '.join(conditions)} LIMIT 1000"

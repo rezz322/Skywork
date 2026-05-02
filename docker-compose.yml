@@ -41,10 +41,9 @@ services:
       - ./clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8123/ping || exit 1"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 20s
     networks:
       - osint_net
 
@@ -79,8 +78,6 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     networks:
       - osint_net
 
@@ -138,8 +135,6 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     networks:
       - osint_net
 
