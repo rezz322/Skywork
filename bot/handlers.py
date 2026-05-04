@@ -17,6 +17,7 @@ from database import (
 )
 from utils import generate_html_report
 from search_service import service as search_service
+from notifier import run_manual_check
 
 router = Router()
 logger = logging.getLogger("bot.handlers")
@@ -72,12 +73,17 @@ async def show_admin_panel(message: types.Message, uid: int, edit: bool = False)
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    register_user(user_id, message.from_user.username, message.from_user.first_name)
+    user = get_user(user_id)
+    
+    # Реєструємо, якщо новий
+    if not user:
+        register_user(user_id, message.from_user.username, message.from_user.first_name)
     
     if check_auth(user_id):
         await message.answer(messages.START_MESSAGE, reply_markup=get_main_keyboard(user_id))
     else:
-        await message.answer("🔑 <b>Доступ обмежено!</b>\n\nБудь ласка, введіть персональний пароль.", parse_mode="HTML")
+        # ПОВНЕ ІГНОРУВАННЯ для неавторизованих (згідно з ТЗ)
+        return
 
 @router.message(F.contact)
 async def handle_contact(message: types.Message):
@@ -198,6 +204,27 @@ async def cb_admin_help(callback: types.CallbackQuery):
     )
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
+
+@router.message(Command("check"))
+async def cmd_check(message: types.Message):
+    if not is_super_admin(message.from_user.id): return
+    
+    sent_msg = await message.answer("🔄 <b>Перевіряю базу даних...</b>", parse_mode="HTML")
+    report, has_changes = await run_manual_check(message.from_user.id)
+    
+    # Видаляємо статус-повідомлення
+    try:
+        await sent_msg.delete()
+    except:
+        pass
+        
+    if has_changes:
+        # Надсилаємо звіт усім супер-адмінам, якщо є зміни
+        from notifier import notify_super_admins as broadcast
+        await broadcast(report)
+    else:
+        # Якщо змін немає - відповідаємо тільки тому, хто запитав
+        await message.answer(report, parse_mode="HTML")
 
 # --- Команди Адміністраторів ---
 
@@ -441,13 +468,13 @@ async def handle_all_text(message: types.Message):
             return
         else:
             logger.info(f"Wrong password attempt by {user_id}: {text}")
-            # Сповіщення про будь-який невірний пароль
+            # Сповіщення про будь-який невірний пароль (адміну)
             await notify_super_admins(
                 f"⚠️ <b>НЕВІРНИЙ ПАРОЛЬ!</b>\n\n"
                 f"👤 <b>Користувач:</b> @{message.from_user.username} (ID: {user_id})\n"
                 f"🔑 <b>Ввів:</b> <code>{text}</code>"
             )
-            await message.answer("❌ <b>Невірний пароль!</b>\nБудь ласка, зверніться до адміністратора.", parse_mode="HTML")
+            # Повністю ігноруємо користувача (не відправляємо "Невірний пароль")
             return
 
     # 2. Якщо вже авторизований - обробляємо команди або пошук

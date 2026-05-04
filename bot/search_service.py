@@ -210,6 +210,11 @@ class ClickHouseSearchService:
             conditions = [f"hasTokenCaseInsensitive(fio, %(t{i})s)" for i in range(len(tokens))]
             for i, t in enumerate(tokens): params[f"t{i}"] = t
 
+        # Захист від SQL Injection: перевіряємо назву таблиці
+        if not re.match(r'^[a-zA-Z0-9_]+$', target_table):
+            logger.error(f"Invalid table name: {target_table}")
+            return []
+
         sql = f"SELECT * FROM {target_table} WHERE {' AND '.join(conditions)} LIMIT 1000"
         client = await self.get_client()
         logger.info(f"Executing Multi-Search [level {pivot_level}]: {query}")
@@ -287,11 +292,18 @@ class ClickHouseSearchService:
             return []
 
     async def execute_raw_sql(self, sql_content: str):
-        """Выполняет произвольный SQL и возвращает данные для SELECT."""
+        """Виконує довільний SQL та повертає дані для SELECT."""
         client = await self.get_client()
         try:
             sql_stripped = sql_content.strip()
-            if sql_stripped.lower().startswith("select"):
+            sql_lower = sql_stripped.lower()
+            
+            # Заборона небезпечних операцій
+            forbidden = ["drop", "truncate", "delete", "alter", "update", "insert", "create"]
+            if any(cmd in sql_lower for cmd in forbidden):
+                return False, "Використання небезпечних SQL команд (DROP, TRUNCATE, тощо) заборонено"
+
+            if sql_lower.startswith("select"):
                 res = await client.query(sql_stripped)
                 return True, list(res.result_rows)
             else:
@@ -300,6 +312,25 @@ class ClickHouseSearchService:
         except Exception as e:
             logger.error(f"SQL Execution error: {e}")
             return False, str(e)
+
+    async def get_all_source_counts(self):
+        """Отримує кількість записів для кожної source_table у UA та RU базах."""
+        client = await self.get_client()
+        counts = {}
+        try:
+            for table in ["global_search_ua", "global_search_ru"]:
+                # ClickHouse query to group by source_table
+                sql = f"SELECT source_table, count(*) as cnt FROM {table} GROUP BY source_table"
+                res = await client.query(sql)
+                for row in res.named_results():
+                    source = row['source_table'] or "unknown"
+                    # Key format: "table:source_name"
+                    key = f"{table}:{source}"
+                    counts[key] = int(row['cnt'])
+            return counts
+        except Exception as e:
+            logger.error(f"Error getting counts from ClickHouse: {e}")
+            return {}
 
 # Singleton сервис
 service = ClickHouseSearchService()
