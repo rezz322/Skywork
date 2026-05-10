@@ -215,7 +215,8 @@ class ClickHouseSearchService:
             pass_conds = [f"passport LIKE %(pass{i})s" for i in range(len(criteria['passports']))]
             conditions.append(f"({' OR '.join(pass_conds)})")
             for i, p in enumerate(criteria['passports']): 
-                params[f"pass{i}"] = f"%{re.sub(r'[^\d]', '', p)}%"
+                clean_p = re.sub(r'[^\d]', '', p)
+                params[f"pass{i}"] = f"%{clean_p}%"
 
         if criteria['snils']:
             snils_conds = [f"snils = %(sn{i})s" for i in range(len(criteria['snils']))]
@@ -227,7 +228,8 @@ class ClickHouseSearchService:
             nick_conds = [f"nickname ILIKE %(nick{i})s" for i in range(len(criteria['nicknames']))]
             conditions.append(f"({' OR '.join(nick_conds)})")
             for i, n in enumerate(criteria['nicknames']): 
-                params[f"nick{i}"] = f"%{n.replace('@', '')}%"
+                clean_n = n.replace('@', '')
+                params[f"nick{i}"] = f"%{clean_n}%"
 
         # Telegram ID (якщо це число від 5 до 15 знаків і не потрапило в інші категорії)
         tg_ids = [t for t in re.findall(r'\b\d{5,15}\b', query) if t not in criteria['inns'] and t not in [re.sub(r'[^\d]', '', p) for p in criteria['passports']]]
@@ -246,14 +248,13 @@ class ClickHouseSearchService:
 
         # Захист від SQL Injection: перевіряємо назву таблиці
         if not re.match(r'^[a-zA-Z0-9_]+$', target_table):
-            logger.error(f"Invalid table name: {target_table}")
             return []
 
         fields = "lowerUTF8(fio) AS fio, phone, email, inn, snils, driver_license, lowerUTF8(address) AS address, nickname, transport, birth_date, source_table, passport, password, raw_data, tg_id"
         sql = f"SELECT {fields} FROM {target_table} WHERE {' AND '.join(conditions)} LIMIT 1000"
         client = await self.get_client()
         logger.info(f"Executing Multi-Search [level {pivot_level}]: {query}")
-
+        
         try:
             async with self.semaphore:
                 res = await client.query(sql, parameters=params)
