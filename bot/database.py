@@ -161,7 +161,9 @@ def set_role(user_id, role):
             cur.execute("UPDATE users SET role = %s WHERE user_id = %s", (role, user_id))
             conn.commit()
             return True
-    except: return False
+    except Exception as e:
+        logger.error(f"Error setting role for {user_id}: {e}")
+        return False
     finally:
         if conn: pg_pool.putconn(conn)
 

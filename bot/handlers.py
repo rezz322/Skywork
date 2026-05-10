@@ -360,8 +360,10 @@ async def cmd_add_admin(message: types.Message, command: CommandObject):
         await message.answer("❌ Користувач не знайдений в базі.")
         return
         
-    set_role(user['user_id'], 'admin')
-    await message.answer(f"✅ @{user['username']} призначений Адміном.")
+    if set_role(user['user_id'], 'admin'):
+        await message.answer(f"✅ @{user['username']} призначений Адміном.\n\n💡 Користувачу потрібно прописати /start, щоб оновити меню.")
+    else:
+        await message.answer("❌ Помилка при зміні ролі в базі даних.")
 
 @router.message(Command("demote"))
 async def cmd_demote(message: types.Message, command: CommandObject):

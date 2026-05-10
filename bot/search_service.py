@@ -141,17 +141,25 @@ class ClickHouseSearchService:
         if not query: return []
         
         # 1. Витягуємо всі можливі ідентифікатори з запиту
-        q_clean_for_phones = re.sub(r'[\s\-\.\(\)\+]', '', query)
-        
         criteria = {
-            'phones': re.findall(r'\b(?:\+?380|7|8|0)\d{9,11}\b', q_clean_for_phones),
+            'phones': re.findall(r'\+?[\d\s\-\(\)]{10,15}', query),
             'emails': re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', query),
             'dates': re.findall(r'\b(?:\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})\b', query),
             'years': re.findall(r'\b(?:19\d{2}|20[012]\d)\b', query),
             'inns': re.findall(r'\b\d{10}\b|\b\d{12}\b', query),
-            'passports': re.findall(r'\b\d{4}\s\d{6}\b', query),
-            'vins': re.findall(r'\b[A-HJ-NPR-Z0-9]{17}\b', query.upper())
+            'passports': re.findall(r'\b\d{4}\s?\d{6}\b|\b\d{10}\b', query),
+            'vins': re.findall(r'\b[A-HJ-NPR-Z0-9]{17}\b', query.upper()),
+            'snils': re.findall(r'\b\d{3}-\d{3}-\d{3}\s\d{2}\b|\b\d{11}\b', query),
+            'nicknames': re.findall(r'@[a-zA-Z0-9_]{3,32}', query)
         }
+
+        # Спеціальна обробка телефонів: залишаємо лише ті, що реально схожі на номери (10-12 цифр)
+        valid_phones = []
+        for p in criteria['phones']:
+            digits = re.sub(r'[^\d]', '', p)
+            if 10 <= len(digits) <= 12:
+                valid_phones.append(digits)
+        criteria['phones'] = list(set(valid_phones))
 
 
         # Очищаємо запит від знайдених ідентифікаторів, щоб залишити тільки ПІБ
@@ -176,7 +184,7 @@ class ClickHouseSearchService:
             for i, p in enumerate(criteria['phones']):
                 core = p[-10:]
                 params[f"p{i}"] = f"%{core}%"
-                phone_conds.append(f"phone LIKE %(p{i})s OR mobile LIKE %(p{i})s")
+                phone_conds.append(f"phone LIKE %(p{i})s")
             conditions.append(f"({' OR '.join(phone_conds)})")
 
         if criteria['emails']:
@@ -203,11 +211,37 @@ class ClickHouseSearchService:
             conditions.append(f"({' OR '.join(vin_conds)})")
             for i, v in enumerate(criteria['vins']): params[f"v{i}"] = f"%{v}%"
 
+        if criteria['passports']:
+            pass_conds = [f"passport LIKE %(pass{i})s" for i in range(len(criteria['passports']))]
+            conditions.append(f"({' OR '.join(pass_conds)})")
+            for i, p in enumerate(criteria['passports']): 
+                params[f"pass{i}"] = f"%{re.sub(r'[^\d]', '', p)}%"
+
+        if criteria['snils']:
+            snils_conds = [f"snils = %(sn{i})s" for i in range(len(criteria['snils']))]
+            conditions.append(f"({' OR '.join(snils_conds)})")
+            for i, s in enumerate(criteria['snils']): 
+                params[f"sn{i}"] = re.sub(r'[^\d]', '', s)
+
+        if criteria['nicknames']:
+            nick_conds = [f"nickname ILIKE %(nick{i})s" for i in range(len(criteria['nicknames']))]
+            conditions.append(f"({' OR '.join(nick_conds)})")
+            for i, n in enumerate(criteria['nicknames']): 
+                params[f"nick{i}"] = f"%{n.replace('@', '')}%"
+
+        # Telegram ID (якщо це число від 5 до 15 знаків і не потрапило в інші категорії)
+        tg_ids = [t for t in re.findall(r'\b\d{5,15}\b', query) if t not in criteria['inns'] and t not in [re.sub(r'[^\d]', '', p) for p in criteria['passports']]]
+        if tg_ids:
+            tg_conds = [f"tg_id = %(tg{i})s" for i in range(len(tg_ids))]
+            conditions.append(f"({' OR '.join(tg_conds)})")
+            for i, tid in enumerate(tg_ids): params[f"tg{i}"] = int(tid)
+
 
         if not conditions:
             tokens = [re.sub(r'[^\w]', '', t.lower()) for t in query.split() if len(re.sub(r'[^\w]', '', t)) >= 2]
             if not tokens: return []
-            conditions = [f"hasTokenCaseInsensitive(fio, %(t{i})s)" for i in range(len(tokens))]
+            # Пошук за токенами у ключових текстових полях
+            conditions = [f"(hasTokenCaseInsensitive(fio, %(t{i})s) OR hasTokenCaseInsensitive(address, %(t{i})s) OR hasTokenCaseInsensitive(raw_data, %(t{i})s))" for i in range(len(tokens))]
             for i, t in enumerate(tokens): params[f"t{i}"] = t
 
         # Захист від SQL Injection: перевіряємо назву таблиці
@@ -215,7 +249,8 @@ class ClickHouseSearchService:
             logger.error(f"Invalid table name: {target_table}")
             return []
 
-        sql = f"SELECT * FROM {target_table} WHERE {' AND '.join(conditions)} LIMIT 1000"
+        fields = "lowerUTF8(fio) AS fio, phone, email, inn, snils, driver_license, lowerUTF8(address) AS address, nickname, transport, birth_date, source_table, passport, password, raw_data, tg_id"
+        sql = f"SELECT {fields} FROM {target_table} WHERE {' AND '.join(conditions)} LIMIT 1000"
         client = await self.get_client()
         logger.info(f"Executing Multi-Search [level {pivot_level}]: {query}")
 
