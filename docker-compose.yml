@@ -13,7 +13,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: [ "CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -40,7 +40,7 @@ services:
       - clickhouse_logs:/var/log/clickhouse
       - ./clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8123/ping || exit 1"]
+      test: [ "CMD-SHELL", "wget --spider -q http://127.0.0.1:8123/ping || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -54,7 +54,7 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep PONG || exit 1"]
+      test: [ "CMD-SHELL", "redis-cli ping | grep PONG || exit 1" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -62,48 +62,6 @@ services:
       - osint_net
 
   # --- МИКРОСЕРВИСЫ ---
-  db-service:
-    build:
-      context: ./db-service
-    container_name: osint_db_service
-    restart: always
-    environment:
-      DB_HOST: ${POSTGRES_HOST}
-      DB_PORT: ${POSTGRES_PORT}
-      DB_USER: ${POSTGRES_USER}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
-      DB_NAME: ${POSTGRES_DB}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
-    networks:
-      - osint_net
-
-  pay-service:
-    build:
-      context: ./pay-service
-    container_name: osint_pay_service
-    restart: always
-    environment:
-      PORT: 8080
-      CRYPTO_PAY_TOKEN: ${CRYPTO_PAY_TOKEN}
-      IPN_CALLBACK_URL: ${IPN_CALLBACK_URL}
-      DB_HOST: ${POSTGRES_HOST}
-      DB_PORT: ${POSTGRES_PORT}
-      DB_USER: ${POSTGRES_USER}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
-      DB_NAME: ${POSTGRES_DB}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-    ports:
-      - "8080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - osint_net
-
   bot:
     build:
       context: ./bot
@@ -112,7 +70,6 @@ services:
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       REDIS_URL: redis://redis:6379/0
-      DB_SERVICE_URL: http://db-service:8000
       POSTGRES_HOST: ${POSTGRES_HOST}
       POSTGRES_PORT: ${POSTGRES_PORT}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -129,8 +86,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      db-service:
-        condition: service_started
       postgres:
         condition: service_healthy
       clickhouse:

@@ -12,7 +12,7 @@ import messages
 from config import bot, r, SUPER_ADMIN_IDS
 from database import (
     register_user, get_user, get_user_by_username, set_user_password,
-    check_auth, validate_password, update_user_phone, set_role,
+    check_auth, validate_password, update_user_phone, authorize_user, set_role,
     get_all_by_role, get_all_users, get_users_by_admin, is_super_admin, get_db_stats, ban_user, delete_user
 )
 from utils import generate_html_report
@@ -56,10 +56,10 @@ async def show_admin_panel(message: types.Message, uid: int, edit: bool = False)
         builder.row(InlineKeyboardButton(text="👥 Усі користувачі", callback_data="admin_users_all"))
         builder.row(InlineKeyboardButton(text="📂 Мої учасники", callback_data="admin_users_my"))
         builder.row(InlineKeyboardButton(text="👮 Список адмінів", callback_data="admin_admins"))
+        builder.row(InlineKeyboardButton(text="📊 Статистика бази", callback_data="admin_stats"))
     else:
         builder.row(InlineKeyboardButton(text="👥 Мої користувачі", callback_data="admin_users_my"))
         
-    builder.row(InlineKeyboardButton(text="📊 Статистика бази", callback_data="admin_stats"))
     builder.row(InlineKeyboardButton(text="📝 Як реєструвати?", callback_data="admin_help"))
     
     text = "🛠 <b>Панель керування SKYWORK</b>\n\nВиберіть потрібний розділ:"
@@ -85,17 +85,7 @@ async def cmd_start(message: types.Message):
         # ПОВНЕ ІГНОРУВАННЯ для неавторизованих (згідно з ТЗ)
         return
 
-@router.message(F.contact)
-async def handle_contact(message: types.Message):
-    user_id = message.from_user.id
-    if not await r.get(f"user_temp_auth:{user_id}"): return
-    
-    phone = message.contact.phone_number
-    update_user_phone(user_id, phone)
-    await r.delete(f"user_temp_auth:{user_id}")
-    
-    await message.answer("✅ <b>Верифікація успішна!</b>", parse_mode="HTML", reply_markup=get_main_keyboard(user_id))
-    await notify_super_admins(f"👤 <b>Новий вхід!</b>\nЮзер: @{message.from_user.username}\nТелефон: {phone}")
+
 
 # --- Коллбеки Адмін-панелі ---
 @router.callback_query(F.data == "admin_users_all")
@@ -291,8 +281,7 @@ async def cb_back_to_admin(callback: types.CallbackQuery):
 @router.message(Command("stats"))
 async def cmd_stats(message: types.Message, from_user_id: int = None, edit: bool = False):
     uid = from_user_id or message.from_user.id
-    user = get_user(uid)
-    if not is_super_admin(uid) and (not user or user['role'] != 'admin'):
+    if not is_super_admin(uid):
         return
     
     stats = get_db_stats()
@@ -437,18 +426,13 @@ async def handle_all_text(message: types.Message):
         success, status = validate_password(user_id, text)
         
         if success:
-            # Тимчасово позначаємо в Redis що він ввів пароль і чекаємо телефон (на 10 хв)
-            await r.set(f"user_temp_auth:{user_id}", "true", ex=600)
-            
-            # Запитуємо телефон для завершення реєстрації
-            builder = ReplyKeyboardBuilder()
-            builder.row(types.KeyboardButton(text="📱 Надіслати номер телефону", request_contact=True))
-            
+            authorize_user(user_id)
             await message.answer(
-                "🔓 <b>Пароль вірний!</b>\nДля завершення входу, будь ласка, натисніть кнопку нижче, щоб поділитися контактом.",
-                reply_markup=builder.as_markup(resize_keyboard=True),
+                "✅ <b>Вхід успішний!</b>\nЛаскаво просимо до системи. Тепер вам доступний пошук.",
+                reply_markup=get_main_keyboard(user_id),
                 parse_mode="HTML"
             )
+            await notify_super_admins(f"👤 <b>Новий вхід!</b>\nЮзер: @{message.from_user.username}")
             return
         elif status.startswith("theft:"):
             parts = status.split(":")
@@ -470,12 +454,6 @@ async def handle_all_text(message: types.Message):
             return
         else:
             logger.info(f"Wrong password attempt by {user_id}: {text}")
-            # Сповіщення про будь-який невірний пароль (адміну)
-            await notify_super_admins(
-                f"⚠️ <b>НЕВІРНИЙ ПАРОЛЬ!</b>\n\n"
-                f"👤 <b>Користувач:</b> @{message.from_user.username} (ID: {user_id})\n"
-                f"🔑 <b>Ввів:</b> <code>{text}</code>"
-            )
             # Повністю ігноруємо користувача (не відправляємо "Невірний пароль")
             return
 

@@ -67,24 +67,30 @@ def get_user(user_id):
     finally:
         if conn: pg_pool.putconn(conn)
 
-def get_user_by_username(username):
-    if not username: return None
-    username = username.replace("@", "").strip()
+def get_user_by_username(identifier):
+    if not identifier: return None
+    identifier = str(identifier).replace("@", "").strip()
     if not pg_pool: return None
     conn = None
     try:
         conn = pg_pool.getconn()
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE username = %s", (username,))
-            columns = [desc[0] for desc in cur.description]
+            if identifier.isdigit():
+                cur.execute("SELECT * FROM users WHERE user_id = %s OR username = %s OR first_name = %s LIMIT 1", (int(identifier), identifier, identifier))
+            else:
+                cur.execute("SELECT * FROM users WHERE username = %s OR first_name = %s LIMIT 1", (identifier, identifier))
+            
             row = cur.fetchone()
-            return dict(zip(columns, row)) if row else None
+            if row:
+                columns = [desc[0] for desc in cur.description]
+                return dict(zip(columns, row))
+            return None
     finally:
         if conn: pg_pool.putconn(conn)
 
-def set_user_password(username, password, admin_id):
-    """Админ выдает пароль пользователю по нику"""
-    user = get_user_by_username(username)
+def set_user_password(identifier, password, admin_id):
+    """Админ выдает пароль пользователю по нику, имени или ID"""
+    user = get_user_by_username(identifier)
     if not user: return False, "Користувач не знайдений в базі. Нехай спочатку напише боту /start"
     
     h = hash_password(password)
@@ -97,7 +103,9 @@ def set_user_password(username, password, admin_id):
                 WHERE user_id = %s
             """, (h, password, admin_id, user['user_id']))
             conn.commit()
-            return True, f"Пароль для {username} встановлено: {password}"
+            
+            display_name = user['username'] if user['username'] else (user['first_name'] or str(user['user_id']))
+            return True, f"Пароль для {display_name} встановлено: {password}"
     except Exception as e:
         logger.error(f"Error setting password: {e}")
         return False, str(e)
@@ -142,6 +150,16 @@ def validate_password(user_id, password):
 def authorize_user_step_1(user_id):
     """Помечает что пароль введен верно (для ожидания телефона)"""
     return True # Логика в handlers.py через временный флаг или Redis
+
+def authorize_user(user_id):
+    conn = None
+    try:
+        conn = pg_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET is_authorized = TRUE WHERE user_id = %s", (user_id,))
+            conn.commit()
+    finally:
+        if conn: pg_pool.putconn(conn)
 
 def update_user_phone(user_id, phone):
     conn = None

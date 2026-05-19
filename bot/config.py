@@ -1,7 +1,7 @@
 import os
 import logging
 import sys
-import redis.asyncio as redis
+from redis.asyncio import Redis
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
@@ -16,7 +16,6 @@ logger = logging.getLogger("bot")
 # Токен и URL
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
-DB_SERVICE_URL = os.getenv("DB_SERVICE_URL")
 # Пароль та Адміни
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "1234")
 _super_admins = os.getenv("SUPER_ADMIN_IDS", "")
@@ -30,7 +29,7 @@ if not TOKEN:
 # Инициализация бота и диспетчера
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-r = redis.from_url(REDIS_URL, decode_responses=True)
+r: Redis = Redis.from_url(REDIS_URL, decode_responses=True)  # type: ignore
 
 # PostgreSQL Config
 PG_CONFIG = {
