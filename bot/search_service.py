@@ -262,9 +262,9 @@ class ClickHouseSearchService:
                 auto_field = "snils"
             elif dlen == 10:
                 # НЕОДНОЗНАЧНО: може бути INN (10 цифр) АБО телефон без коду країни
-                # Шукаємо в ОБОХ полях одночасно через OR
+                # НЕ додаємо phones — умова (inn=X OR phone IN(...)) будується в INN-блоці
                 criteria['inns'] = [q_digits]
-                criteria['phones'] = [q_digits]  # залишаємо для phone-умови
+                criteria['phones'] = []  # очищаємо щоб не додавати окрему AND-умову
                 auto_field = "inn_or_phone"
 
 
