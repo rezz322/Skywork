@@ -363,7 +363,7 @@ class ClickHouseSearchService:
             f"SELECT {fields} FROM {target_table} "
             f"WHERE {' AND '.join(conditions)} "
             f"LIMIT 500 "
-            f"SETTINGS max_execution_time=60, max_memory_usage=536870912"
+            f"SETTINGS max_memory_usage=536870912"
         )
         logger.info(f"Executing Multi-Search [level {pivot_level}]: {query[:60]}")
         
