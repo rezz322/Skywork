@@ -195,25 +195,39 @@ class ClickHouseSearchService:
                 valid_phones.append(digits)
         criteria['phones'] = list(set(valid_phones))
 
-        # Якщо це чисто числовий запит — визначаємо поле та шукаємо тільки по ньому
+        # Якщо це чисто числовий запит — уточнюємо поля
         q_digits = re.sub(r'[^\d]', '', query)
         if re.sub(r'[\s\-\.\(\)\+\/]', '', query).isdigit() and not criteria['emails'] and not criteria['nicknames']:
             dlen = len(q_digits)
             if dlen == 12 and not q_digits.startswith('380'):
-                # INN физлица или SNILS-ambiguous — приоритет INN
+                # 12 цифр не 380... = INN фізосіб РФ (однозначно)
                 criteria['inns'] = [q_digits]
                 criteria['phones'] = []
                 criteria['snils'] = []
                 auto_field = "inn"
+            elif dlen == 12 and q_digits.startswith('380'):
+                # 380... = телефон України
+                criteria['phones'] = [q_digits]
+                criteria['inns'] = []
+                auto_field = "phone"
+            elif dlen == 11 and q_digits.startswith(('7', '8')):
+                # 7/8... = телефон РФ
+                criteria['phones'] = [q_digits]
+                criteria['inns'] = []
+                criteria['snils'] = []
+                auto_field = "phone"
             elif dlen == 11 and not q_digits.startswith(('7', '8')):
+                # 11 цифр не 7/8 = СНІЛС
                 criteria['snils'] = [q_digits]
                 criteria['phones'] = []
                 criteria['inns'] = []
                 auto_field = "snils"
-            elif dlen == 10 and not q_digits.startswith(('7', '8', '9', '38')):
+            elif dlen == 10:
+                # НЕОДНОЗНАЧНО: може бути INN (10 цифр) АБО телефон без коду країни
+                # Шукаємо в ОБОХ полях одночасно через OR
                 criteria['inns'] = [q_digits]
-                criteria['phones'] = []
-                auto_field = "inn"
+                criteria['phones'] = [q_digits]  # залишаємо для phone-умови
+                auto_field = "inn_or_phone"
 
 
         # Очищаємо запит від знайдених ідентифікаторів, щоб залишити тільки ПІБ
@@ -236,10 +250,8 @@ class ClickHouseSearchService:
         if criteria['phones']:
             phone_conds = []
             for i, p in enumerate(criteria['phones']):
-                # Точне співпадіння останніх 10 цифр — використовує ORDER BY індекс
                 core = p[-10:]
                 params[f"p{i}"] = core
-                # endsWith швидше ніж LIKE '%...%' і може використовувати skip index
                 phone_conds.append(f"endsWith(phone, %(p{i})s)")
             conditions.append(f"({' OR '.join(phone_conds)})")
 
@@ -261,9 +273,18 @@ class ClickHouseSearchService:
             for i, y in enumerate(criteria['years']): params[f"y{i}"] = y
 
         if criteria['inns']:
-            inn_conds = [f"inn = %(inn{i})s" for i in range(len(criteria['inns']))]
-            conditions.append(f"({' OR '.join(inn_conds)})")
-            for i, inn in enumerate(criteria['inns']): params[f"inn{i}"] = inn
+            inn_q = criteria['inns'][0]  # беремо перший
+            if auto_field == "inn_or_phone":
+                # 10 цифр — шукаємо і в INN і в phone одночасно
+                params["inn_ambig"] = inn_q
+                params["phone_ambig"] = inn_q
+                conditions.append(
+                    f"(inn = %(inn_ambig)s OR endsWith(phone, %(phone_ambig)s))"
+                )
+            else:
+                inn_conds = [f"inn = %(inn{i})s" for i in range(len(criteria['inns']))]
+                conditions.append(f"({' OR '.join(inn_conds)})")
+                for i, inn in enumerate(criteria['inns']): params[f"inn{i}"] = inn
 
         if criteria['vins']:
             # VIN: шукаємо у transport І raw_data (VIN може бути у доп. полях)
@@ -290,11 +311,20 @@ class ClickHouseSearchService:
                 params[f"sn{i}"] = re.sub(r'[^\d]', '', s)
 
         if criteria['nicknames']:
-            # Точний нікнейм (bloom_filter індекс)
-            nick_conds = [f"nickname = %(nick{i})s" for i in range(len(criteria['nicknames']))]
-            conditions.append(f"({' OR '.join(nick_conds)})")
+            # Никнейм: шукаємо з @ і без @, великі/малі — LIKE покриває всі варіанти
+            nick_conds = []
             for i, n in enumerate(criteria['nicknames']):
-                params[f"nick{i}"] = n.lstrip('@')
+                clean_n = n.lstrip('@').lower()
+                params[f"nick{i}"] = f"%{clean_n}%"
+                nick_conds.append(f"lower(nickname) LIKE %(nick{i})s")
+            conditions.append(f"({' OR '.join(nick_conds)})")
+
+        # Пошук по нікнейму якщо запит — одне слово без пробілів (без @)
+        # Наприклад: 'ivan_petrov' або 'usernameXYZ'
+        if not conditions and len(query.split()) == 1 and re.match(r'^[a-zA-Z0-9_]{3,32}$', query):
+            params["nick_plain"] = f"%{query.lower()}%"
+            conditions.append("lower(nickname) LIKE %(nick_plain)s")
+            auto_field = "nickname"
 
         # Telegram ID (якщо це число від 5 до 15 знаків і не потрапило в інші категорії)
         tg_ids = [t for t in re.findall(r'\b\d{5,15}\b', query) if t not in criteria['inns'] and t not in [re.sub(r'[^\d]', '', p) for p in criteria['passports']]]
@@ -333,7 +363,7 @@ class ClickHouseSearchService:
             f"SELECT {fields} FROM {target_table} "
             f"WHERE {' AND '.join(conditions)} "
             f"LIMIT 500 "
-            f"SETTINGS max_execution_time=15, max_memory_usage=268435456"
+            f"SETTINGS max_execution_time=60, max_memory_usage=536870912"
         )
         logger.info(f"Executing Multi-Search [level {pivot_level}]: {query[:60]}")
         
