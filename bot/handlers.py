@@ -80,7 +80,7 @@ async def cmd_start(message: types.Message):
         register_user(user_id, message.from_user.username, message.from_user.first_name)
     
     if check_auth(user_id):
-        await message.answer(messages.START_MESSAGE, reply_markup=get_main_keyboard(user_id))
+        await message.answer(messages.START_MESSAGE, reply_markup=get_main_keyboard(user_id), parse_mode="HTML")
     else:
         # ПОВНЕ ІГНОРУВАННЯ для неавторизованих (згідно з ТЗ)
         return
@@ -531,9 +531,21 @@ async def handle_all_text(message: types.Message):
             return
 
     # ЗВИЧАЙНИЙ ПОШУК
-    msg = await message.answer(f"🔍 Шукаю: <code>{text}</code>...", parse_mode="HTML")
+    field_labels = {
+        "fio": "ПІБ", "phone": "Телефон", "email": "Email",
+        "inn": "ІНН/РНОКПП", "snils": "СНІЛС", "birth_date": "Дата народження",
+        "passport": "Паспорт", "nickname": "Нікнейм", "tg_id": "Telegram ID",
+        "vin": "VIN авто", "tg_id": "Telegram ID", "defect": "Невизначено"
+    }
+    # Визначаємо поле заздалегідь для показу
+    detected_field = search_service.detect_search_field(text)
+    field_label = field_labels.get(detected_field, detected_field)
+    msg = await message.answer(
+        f"🔍 Шукаю: <code>{text}</code>\n📌 <b>Поле:</b> {field_label}",
+        parse_mode="HTML"
+    )
     
-    results_matrix = await search_across_tables(text, table=table_name)
+    results_matrix, auto_field = await search_across_tables(text, table=table_name, return_field=True)
     local_results_count = sum(len(table_data) - 1 for table_data in results_matrix if len(table_data) > 1)
     
     if local_results_count > 0:
@@ -547,7 +559,10 @@ async def handle_all_text(message: types.Message):
         filename = f"report_{report_id}.html"
         with open(filename, "w", encoding="utf-8") as f: f.write(analyzed_html)
         
-        await msg.edit_text(f"✅ Знайдено: <b>{local_results_count}</b>", parse_mode="HTML")
+        await msg.edit_text(
+            f"✅ Знайдено: <b>{local_results_count}</b> записів\n📌 <b>Поле пошуку:</b> {field_labels.get(auto_field, auto_field)}",
+            parse_mode="HTML"
+        )
         try:
             await bot.send_document(message.chat.id, FSInputFile(filename), caption=f"📊 <b>Звіт: {text}</b>", parse_mode="HTML")
         except Exception as e:
@@ -558,6 +573,6 @@ async def handle_all_text(message: types.Message):
         await msg.edit_text(messages.SEARCH_NOT_FOUND, parse_mode="HTML")
 
 
-async def search_across_tables(query, table):
+async def search_across_tables(query, table, return_field=False):
     from search_service import search_across_tables as sat
-    return await sat(query, table=table)
+    return await sat(query, table=table, return_field=return_field)
