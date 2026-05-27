@@ -138,6 +138,47 @@ class ClickHouseSearchService:
         return "fio"
 
 
+    def phone_variants(self, raw: str) -> list:
+        """
+        Генерує всі можливі формати зберігання номера для пошуку через IN().
+        Це дає можливість використовувати примарний індекс ORDER BY на повну швидкість.
+        """
+        d = re.sub(r'[^\d]', '', raw)
+        variants = set()
+        # Беремо останні 10 цифр як базу
+        core = d[-10:] if len(d) >= 10 else d
+        if len(core) == 10:
+            variants.update([
+                core,               # 0XXXXXXXXX або XXXXXXXXXX
+                '7' + core,         # 7XXXXXXXXXX (РФ)
+                '8' + core,         # 8XXXXXXXXXX (РФ старий)
+                '+7' + core,        # +7XXXXXXXXXX
+                '380' + core[1:] if core.startswith('0') else '',  # 380XXXXXXXXX (УА)
+                '0' + core[1:] if not core.startswith('0') else core,  # 0XXXXXXXXX (УА локал)
+                '380' + core,       # 38010 цифр
+            ])
+        elif len(d) == 11 and d.startswith(('7', '8')):
+            core10 = d[1:]
+            variants.update([
+                d,          # 79001234567
+                '7' + core10,
+                '8' + core10,
+                '+7' + core10,
+                core10,
+            ])
+        elif len(d) == 12 and d.startswith('380'):
+            core10 = d[2:]  # 0XXXXXXXXX
+            variants.update([
+                d,           # 380XXXXXXXXX
+                '+' + d,     # +380XXXXXXXXX
+                core10,      # 0XXXXXXXXX
+                core10[1:],  # XXXXXXXXX (9 digits)
+            ])
+        # Додаємо сам оригінальний
+        variants.add(d)
+        # Чистимо порожняки
+        return [v for v in variants if v and len(v) >= 7]
+
     def format_query(self, query: str, field: str) -> str:
         """Форматирование запроса."""
         query = query.strip()
@@ -148,8 +189,6 @@ class ClickHouseSearchService:
                 res = '7' + res[1:]
             return res
         if field == "passport":
-            # Для паспорта извлекаем только первую комбинацию из 10 цифр (серия + номер)
-            # Это важно, если в строке есть дата выдачи или код подразделения
             match = re.search(r'\d{10}', re.sub(r'\s', '', query))
             if match:
                 return match.group(0)
@@ -157,7 +196,6 @@ class ClickHouseSearchService:
         if field == "fio":
             return query.lower()
         if field == "birth_date":
-            # Нормализуем разделители даты к точкам (если нужно для базы)
             return query.replace('-', '.')
         return query
 
@@ -236,7 +274,9 @@ class ClickHouseSearchService:
             for val in criteria[key]:
                 clean_fio = clean_fio.replace(val, "")
         
+        # Обмежуємо FIO до 3 токенів (інакше на 1.4млрд рядків занадто повільно)
         fio_tokens = [re.sub(r'[^\w]', '', t.lower()) for t in clean_fio.split() if len(re.sub(r'[^\w]', '', t)) > 2]
+        fio_tokens = fio_tokens[:3]
 
         # 2. Будуємо SQL умову
         conditions = []
@@ -248,12 +288,16 @@ class ClickHouseSearchService:
                 params[f"t{i}"] = token
 
         if criteria['phones']:
-            phone_conds = []
-            for i, p in enumerate(criteria['phones']):
-                core = p[-10:]
-                params[f"p{i}"] = core
-                phone_conds.append(f"endsWith(phone, %(p{i})s)")
-            conditions.append(f"({' OR '.join(phone_conds)})")
+            # Генеруємо всі варіанти формату і шукаємо через IN() — використовує примарний індекс ORDER BY
+            all_variants = []
+            for p in criteria['phones']:
+                all_variants.extend(self.phone_variants(p))
+            all_variants = list(set(all_variants))
+            # Параметризуємо кожен варіант
+            for i, v in enumerate(all_variants):
+                params[f"ph{i}"] = v
+            in_list = ", ".join(f"%(ph{i})s" for i in range(len(all_variants)))
+            conditions.append(f"phone IN ({in_list})")
 
         if criteria['emails']:
             # Email: пошук по вхожденню (ngrambf_v1 індекс підтримує LIKE)
@@ -273,13 +317,16 @@ class ClickHouseSearchService:
             for i, y in enumerate(criteria['years']): params[f"y{i}"] = y
 
         if criteria['inns']:
-            inn_q = criteria['inns'][0]  # беремо перший
+            inn_q = criteria['inns'][0]
             if auto_field == "inn_or_phone":
-                # 10 цифр — шукаємо і в INN і в phone одночасно
+                # 10 цифр — шукаємо і в INN і всі варіанти phone через IN()
+                phone_vars = self.phone_variants(inn_q)
+                for i, v in enumerate(phone_vars):
+                    params[f"pa{i}"] = v
+                phone_in = ", ".join(f"%(pa{i})s" for i in range(len(phone_vars)))
                 params["inn_ambig"] = inn_q
-                params["phone_ambig"] = inn_q
                 conditions.append(
-                    f"(inn = %(inn_ambig)s OR endsWith(phone, %(phone_ambig)s))"
+                    f"(inn = %(inn_ambig)s OR phone IN ({phone_in}))"
                 )
             else:
                 inn_conds = [f"inn = %(inn{i})s" for i in range(len(criteria['inns']))]
