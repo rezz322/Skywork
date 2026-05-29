@@ -66,6 +66,19 @@ class ClickHouseSearchService:
         """Определяет тип данных (Smart Dispatcher) для РФ и Украины."""
         query = query.strip()
 
+        # --- Явні префікси (вищий пріоритет) ---
+        # Адреса: /adr <текст>
+        if query.lower().startswith('/adr '):
+            return "address"
+
+        # Паспорт: /p <текст>
+        if query.lower().startswith('/p '):
+            return "passport"
+
+        # Водительське посвідчення: /vu <текст>
+        if query.lower().startswith('/vu '):
+            return "driver_license"
+
         # Email
         if re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', query):
             return "email"
@@ -82,9 +95,12 @@ class ClickHouseSearchService:
         if re.search(r'\d{4}\s\d{6}', query):
             return "passport"
 
-        # Если начинается с +, это точно телефон
-        if query.startswith('+') and re.sub(r'[^\d]', '', query).isdigit():
-            return "phone"
+        # Телефон: починається з + — це завжди телефон
+        # Якщо є '+' — видаляємо перші 3 цифри (код країни) і шукаємо по решті
+        if query.startswith('+'):
+            q_clean = re.sub(r'[^\d]', '', query)
+            if len(q_clean) >= 7:
+                return "phone"
 
         # Только цифры (после удаления разделителей)
         q_clean = re.sub(r'[^\d]', '', query)
@@ -92,11 +108,7 @@ class ClickHouseSearchService:
         is_only_digits = re.sub(r'[\s\-\.\(\)\+\/]', '', query).isdigit()
 
         if is_only_digits:
-            # ИНН физлица РФ (12 цифр) — проверяем ДО телефона
-            if length == 12:
-                return "inn"
-
-            # СНИЛС РФ (11 цифр НЕ начинается с 7 или 8)
+            # СНИЛС РФ: рівно 11 цифр, НЕ починається з 7 або 8
             if length == 11 and not q_clean.startswith(('7', '8')):
                 return "snils"
 
@@ -107,6 +119,10 @@ class ClickHouseSearchService:
             # Телефон Украины (12 цифр, начинается с 380)
             if length == 12 and q_clean.startswith('380'):
                 return "phone"
+
+            # ИНН физлица РФ (12 цифр, не 380)
+            if length == 12:
+                return "inn"
 
             # ИНН юрлица РФ / РНОКПП Украины (10 цифр)
             if length == 10:
@@ -131,7 +147,7 @@ class ClickHouseSearchService:
         if query.startswith('@'):
             return "nickname"
 
-        # ФИО (2+ слова)
+        # ФИО (2+ слова) — без змін
         if len(query.split()) >= 2:
             return "fio"
 
@@ -179,9 +195,34 @@ class ClickHouseSearchService:
         # Чистимо порожняки
         return [v for v in variants if v and len(v) >= 7]
 
+    def strip_prefix(self, query: str, field: str) -> str:
+        """Видаляє службовий префікс (/adr, /p, /vu) із запиту."""
+        prefixes = {
+            "address": "/adr ",
+            "passport": "/p ",
+            "driver_license": "/vu ",
+        }
+        pfx = prefixes.get(field)
+        if pfx and query.lower().startswith(pfx.lower()):
+            return query[len(pfx):].strip()
+        return query
+
+    def phone_strip_country_code(self, raw: str) -> str:
+        """
+        Якщо номер починається з '+' — повертаємо цифри БЕЗ перших 3 символів коду країни,
+        тобто останні 9-10 цифр для пошуку через phone_variants.
+        """
+        digits = re.sub(r'[^\d]', '', raw)
+        if raw.strip().startswith('+') and len(digits) >= 11:
+            # Відкидаємо код країни (перші len(digits)-10 цифр), залишаємо 10
+            return digits[len(digits) - 10:]
+        return digits
+
     def format_query(self, query: str, field: str) -> str:
         """Форматирование запроса."""
         query = query.strip()
+        # Знімаємо префікс для адреса/паспорта/вод.посвідчення
+        query = self.strip_prefix(query, field)
         if field in ["phone", "inn", "snils", "tg_id"]:
             # Удаляем всё кроме цифр
             res = re.sub(r'[^\d]', '', query)
@@ -208,6 +249,42 @@ class ClickHouseSearchService:
         
         # Визначаємо поле автоматично (для звіту користувачу)
         auto_field = manual_field or self.detect_search_field(query)
+
+        # --- Спеціальні обробники для явних префіксів ---
+        if auto_field == "address":
+            clean_text = self.strip_prefix(query, "address")
+            # Кожне слово — окрема умова AND (hasToken не працює з фразою)
+            tokens = [re.sub(r'[^\w]', '', t.lower()) for t in clean_text.split() if len(re.sub(r'[^\w]', '', t)) >= 2]
+            if not tokens:
+                if return_field: return [], auto_field
+                return []
+            conditions = [f"hasTokenCaseInsensitive(address, %(adr{i})s)" for i in range(len(tokens))]
+            params = {f"adr{i}": tokens[i] for i in range(len(tokens))}
+            return await self._run_query(conditions, params, target_table, auto_field, return_field)
+
+        if auto_field == "passport":
+            clean_text = self.strip_prefix(query, "passport")
+            search_val = re.sub(r'[\s\-]', '', clean_text)
+            params = {"pass_q": f"%{search_val}%"}
+            conditions = ["passport LIKE %(pass_q)s"]
+            return await self._run_query(conditions, params, target_table, auto_field, return_field)
+
+        if auto_field == "driver_license":
+            clean_text = self.strip_prefix(query, "driver_license")
+            params = {"dl_q": f"%{clean_text.strip()}%"}
+            conditions = ["driver_license LIKE %(dl_q)s"]
+            return await self._run_query(conditions, params, target_table, auto_field, return_field)
+
+        # --- Телефон з '+': шукаємо по останніх 10 цифрах (без коду країни) ---
+        if query.startswith('+'):
+            core10 = self.phone_strip_country_code(query)
+            all_variants = self.phone_variants(core10)
+            params = {}
+            for i, v in enumerate(all_variants):
+                params[f"ph{i}"] = v
+            in_list = ", ".join(f"%(ph{i})s" for i in range(len(all_variants)))
+            conditions = [f"phone IN ({in_list})"]
+            return await self._run_query(conditions, params, target_table, "phone", return_field)
 
         # 1. Витягуємо всі можливі ідентифікатори з запиту
         criteria = {
@@ -484,6 +561,56 @@ class ClickHouseSearchService:
             logger.error(f"Async search error: {e}")
             if return_field:
                 return [], auto_field
+            return []
+
+    async def _run_query(self, conditions: list, params: dict, target_table: str, auto_field: str, return_field: bool):
+        """Виконує прямий SELECT-запит з готовими conditions/params. Використовується спеціальними обробниками."""
+        if not re.match(r'^[a-zA-Z0-9_]+$', target_table):
+            if return_field: return [], auto_field
+            return []
+
+        cache_key = hashlib.md5(
+            f"{target_table}:{json.dumps(conditions, sort_keys=True)}:{json.dumps(params, sort_keys=True)}".encode()
+        ).hexdigest()
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            if return_field: return cached, auto_field
+            return cached
+
+        fields = "fio, phone, email, inn, snils, driver_license, address, nickname, transport, birth_date, source_table, passport, password, raw_data, tg_id"
+        sql = (
+            f"SELECT {fields} FROM {target_table} "
+            f"WHERE {' AND '.join(conditions)} "
+            f"LIMIT 500 "
+            f"SETTINGS max_memory_usage=536870912"
+        )
+        logger.info(f"Direct query [{auto_field}]: {str(params)[:80]}")
+        client = await self.get_client()
+        try:
+            async with self.semaphore:
+                res = await client.query(sql, parameters=params)
+                rows = list(res.named_results())
+                for row in rows:
+                    if row.get('fio'): row['fio'] = row['fio'].lower()
+                    if row.get('address'): row['address'] = row['address'].lower()
+
+            if not rows:
+                self._cache_set(cache_key, [])
+                if return_field: return [], auto_field
+                return []
+
+            grouped = {}
+            for row in rows:
+                source = row.get('source_table', 'unknown_source')
+                if source not in grouped: grouped[source] = []
+                grouped[source].append(row)
+            results_matrix = [[source] + source_rows for source, source_rows in grouped.items()]
+            self._cache_set(cache_key, results_matrix)
+            if return_field: return results_matrix, auto_field
+            return results_matrix
+        except Exception as e:
+            logger.error(f"_run_query error [{auto_field}]: {e}")
+            if return_field: return [], auto_field
             return []
 
     async def execute_raw_sql(self, sql_content: str):

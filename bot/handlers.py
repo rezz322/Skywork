@@ -470,7 +470,10 @@ async def handle_all_text(message: types.Message):
         return
 
     # Якщо це не команда, то це ПОШУК
-    if text.startswith("/"): return
+    # Дозволяємо спеціальні пошукові префікси: /adr, /p, /vu
+    SEARCH_PREFIXES = ('/adr ', '/p ', '/vu ')
+    is_search_prefix = any(text.lower().startswith(pfx) for pfx in SEARCH_PREFIXES)
+    if text.startswith("/") and not is_search_prefix: return
 
     # Логіка пошуку
     current_mode = await r.get(f"user_mode:{user_id}") or "ua"
@@ -535,7 +538,8 @@ async def handle_all_text(message: types.Message):
         "fio": "ПІБ", "phone": "Телефон", "email": "Email",
         "inn": "ІНН/РНОКПП", "snils": "СНІЛС", "birth_date": "Дата народження",
         "passport": "Паспорт", "nickname": "Нікнейм", "tg_id": "Telegram ID",
-        "vin": "VIN авто", "tg_id": "Telegram ID", "defect": "Невизначено"
+        "vin": "VIN авто", "defect": "Невизначено",
+        "address": "Адреса", "driver_license": "Вод. посвідчення",
     }
     # Визначаємо поле заздалегідь для показу
     detected_field = search_service.detect_search_field(text)
